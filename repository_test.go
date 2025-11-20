@@ -2,8 +2,11 @@ package pbclient
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,6 +64,9 @@ func TestRepositoryList_ComputesTotalPages(t *testing.T) {
 		if r.URL.Path != "/api/collections/test/records" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
+		if r.URL.RawQuery != "page=2&perPage=2" {
+			t.Fatalf("unexpected query: %s", r.URL.RawQuery)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{
@@ -103,4 +109,120 @@ func TestRepositoryList_PropagatesNotFound(t *testing.T) {
 	if err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
+}
+
+func TestRepositoryCreateUpdateDelete(t *testing.T) {
+	var createCalled, updateCalled, deleteCalled bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			createCalled = true
+			body := readBody(t, r)
+			if !strings.Contains(string(body), `"name":"demo"`) {
+				t.Fatalf("unexpected create body: %s", string(body))
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"abc","name":"demo"}`))
+		case http.MethodPatch:
+			updateCalled = true
+			if !strings.Contains(r.URL.Path, "/abc") {
+				t.Fatalf("unexpected update path: %s", r.URL.Path)
+			}
+			body := readBody(t, r)
+			if !strings.Contains(string(body), `"name":"changed"`) {
+				t.Fatalf("unexpected update body: %s", string(body))
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"abc","name":"changed"}`))
+		case http.MethodDelete:
+			deleteCalled = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server)
+	repo := NewRepository[testRecord](client, "test")
+
+	created, err := repo.Create(context.Background(), testRecord{Name: "demo"})
+	if err != nil {
+		t.Fatalf("Create error: %v", err)
+	}
+	if created.ID != "abc" || created.Name != "demo" {
+		t.Fatalf("Create result mismatch: %+v", created)
+	}
+
+	updated, err := repo.Update(context.Background(), "abc", testRecord{Name: "changed"})
+	if err != nil {
+		t.Fatalf("Update error: %v", err)
+	}
+	if updated.Name != "changed" {
+		t.Fatalf("Update result mismatch: %+v", updated)
+	}
+
+	if err := repo.Delete(context.Background(), "abc"); err != nil {
+		t.Fatalf("Delete error: %v", err)
+	}
+
+	if !createCalled || !updateCalled || !deleteCalled {
+		t.Fatalf("expected all CRUD handlers called (create:%v update:%v delete:%v)", createCalled, updateCalled, deleteCalled)
+	}
+}
+
+func TestRepositoryList_FiltersAndFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("filter") != "name='john'" {
+			t.Fatalf("unexpected filter: %s", q.Get("filter"))
+		}
+		if q.Get("fields") != "id,name" {
+			t.Fatalf("unexpected fields: %s", q.Get("fields"))
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"items":[],"page":1,"perPage":10,"totalItems":0,"totalPages":0}`))
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server)
+	repo := NewRepository[testRecord](client, "test")
+
+	opts := ListOptions{
+		Page:    1,
+		PerPage: 10,
+		Filter:  Eq("name", "john"),
+		Fields:  []string{"id", "name"},
+	}
+	if _, err := repo.List(context.Background(), opts); err != nil {
+		t.Fatalf("List error: %v", err)
+	}
+}
+
+func TestRepositoryDeleteHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server)
+	repo := NewRepository[testRecord](client, "test")
+
+	err := repo.Delete(context.Background(), "abc")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+func readBody(t *testing.T, r *http.Request) []byte {
+	t.Helper()
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return data
 }
