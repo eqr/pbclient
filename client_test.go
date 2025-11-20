@@ -187,3 +187,49 @@ func (t *flakyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return t.base.RoundTrip(req)
 }
+
+func TestEnsureAuthenticatedSingleFlight(t *testing.T) {
+	var authCalls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/collections/users/auth-with-password" {
+			http.NotFound(w, r)
+			return
+		}
+		authCalls++
+		_, _ = w.Write([]byte(`{"token":"once"}`))
+	}))
+	defer ts.Close()
+
+	client, err := NewClient(ts.URL, "admin@example.com", "password", WithHTTPClient(ts.Client()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	client.token = ""
+	client.tokenExpires = time.Now().Add(-time.Hour)
+
+	start := make(chan struct{})
+	done := make(chan struct{}, 2)
+
+	go func() {
+		<-start
+		_ = client.ensureAuthenticated()
+		done <- struct{}{}
+	}()
+	go func() {
+		<-start
+		_ = client.ensureAuthenticated()
+		done <- struct{}{}
+	}()
+
+	close(start)
+	<-done
+	<-done
+
+	if authCalls != 1 {
+		t.Fatalf("expected single authentication call, got %d", authCalls)
+	}
+	if client.readToken() != "once" {
+		t.Fatalf("token not set correctly, got %q", client.readToken())
+	}
+}

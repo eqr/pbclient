@@ -26,6 +26,7 @@ type Client struct {
 	httpClient    *http.Client
 	maxRetries    int
 	backoff       time.Duration
+	authMutex     sync.Mutex
 	tokenMutex    sync.RWMutex
 	logger        *slog.Logger
 }
@@ -167,6 +168,12 @@ func (c *Client) authenticate() error {
 
 // ensureAuthenticated lazily obtains or refreshes a token when needed.
 func (c *Client) ensureAuthenticated() error {
+	if c.tokenValid() {
+		return nil
+	}
+	c.authMutex.Lock()
+	defer c.authMutex.Unlock()
+
 	if c.tokenValid() {
 		return nil
 	}
