@@ -69,7 +69,7 @@ A Go client library for PocketBase with automatic token management, generic repo
   - Set Content-Type to application/json
   - Return response for caller to handle
 
-- [ ] Implement retry logic for transient failures (optional)
+- [x] Implement retry logic for transient failures (optional)
   - Retry on network errors
   - Retry on 429 (rate limit)
   - Exponential backoff
@@ -132,68 +132,68 @@ A Go client library for PocketBase with automatic token management, generic repo
   - `TotalPages` int
 
 ### Filter Helpers (`filter.go`)
-- [ ] `Eq(field, value string) string` - field='value'
-- [ ] `Neq(field, value string) string` - field!='value'
-- [ ] `Gt(field, value string) string` - field>value
-- [ ] `Gte(field, value string) string` - field>=value
-- [ ] `Lt(field, value string) string` - field<value
-- [ ] `Lte(field, value string) string` - field<=value
-- [ ] `And(filters ...string) string` - (filter1 && filter2)
-- [ ] `Or(filters ...string) string` - (filter1 || filter2)
+- [x] `Eq(field, value string) string` - field='value'
+- [x] `Neq(field, value string) string` - field!='value'
+- [x] `Gt(field, value string) string` - field>value
+- [x] `Gte(field, value string) string` - field>=value
+- [x] `Lt(field, value string) string` - field<value
+- [x] `Lte(field, value string) string` - field<=value
+- [x] `And(filters ...string) string` - (filter1 && filter2)
+- [x] `Or(filters ...string) string` - (filter1 || filter2)
 
 ## Phase 4: Key-Value Store (`kv.go`)
 
 ### KV Store Implementation
-- [ ] Implement `KVStore` struct:
+- [x] Implement `KVStore` struct:
   - `client` *Client
   - `collection` string (default: "kv_store" or configurable)
 
-- [ ] Implement `NewKVStore(client *Client, collection string) *KVStore`
+- [x] Implement `NewKVStore(client *Client, collection string) *KVStore`
 
 ### KV Operations
-- [ ] `Set(ctx context.Context, key string, value interface{}) error`
+- [x] `Set(ctx context.Context, key string, value interface{}) error`
   - Check if key exists (getRecordIDByKey)
   - If exists: PATCH `/api/collections/{collection}/records/{id}`
   - If not: POST `/api/collections/{collection}/records`
   - Marshal value to JSON string
   - Store as: `{"key": "...", "value": "..."}`
 
-- [ ] `Get(ctx context.Context, key string, dest interface{}) error`
+- [x] `Get(ctx context.Context, key string, dest interface{}) error`
   - GET `/api/collections/{collection}/records?filter=(key='...')`
   - Parse JSON value into dest
   - Return ErrNotFound if key doesn't exist
 
-- [ ] `Delete(ctx context.Context, key string) error`
+- [x] `Delete(ctx context.Context, key string) error`
   - Get record ID by key
   - DELETE `/api/collections/{collection}/records/{id}`
   - Return nil if key doesn't exist (idempotent)
 
-- [ ] `Exists(ctx context.Context, key string) (bool, error)`
+- [x] `Exists(ctx context.Context, key string) (bool, error)`
   - Check if key exists without fetching value
   - More efficient than Get for existence checks
 
-- [ ] `List(ctx context.Context, prefix string) ([]string, error)`
+- [x] `List(ctx context.Context, prefix string) ([]string, error)`
   - List all keys with optional prefix filter
   - Return array of matching keys
 
 ### Helper Methods
-- [ ] `getRecordIDByKey(key string) (string, error)`
+- [x] `getRecordIDByKey(key string) (string, error)`
   - Internal helper to get PocketBase record ID
   - Used by Set, Delete operations
 
 ## Phase 5: Error Handling (`errors.go`)
 
 ### Error Types
-- [ ] `ErrNotFound` - Record/key not found
-- [ ] `ErrUnauthorized` - Authentication failed
-- [ ] `ErrBadRequest` - Invalid request
-- [ ] `ErrConflict` - Unique constraint violation
-- [ ] `ErrRateLimit` - Too many requests
+- [x] `ErrNotFound` - Record/key not found
+- [x] `ErrUnauthorized` - Authentication failed
+- [x] `ErrBadRequest` - Invalid request
+- [x] `ErrConflict` - Unique constraint violation
+- [x] `ErrRateLimit` - Too many requests
 
 ### Error Handling
-- [ ] Implement error wrapping with context
-- [ ] Parse PocketBase error responses
-- [ ] Map HTTP status codes to error types
+- [x] Implement error wrapping with context
+- [x] Parse PocketBase error responses
+- [x] Map HTTP status codes to error types
 
 ## Phase 6: Testing
 

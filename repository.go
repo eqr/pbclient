@@ -221,10 +221,7 @@ func (r *Repository[T]) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("delete failed: status %d: %w", resp.StatusCode, readErr)
 	}
 
-	if err := classifyHTTPError(resp.StatusCode); err != nil {
-		return err
-	}
-	return &HTTPError{Status: resp.StatusCode, Message: strings.TrimSpace(string(body))}
+	return mapHTTPError(resp.StatusCode, body)
 }
 
 // decodeJSONResponse reads and decodes the response, mapping HTTP errors to sentinel values.
@@ -235,10 +232,7 @@ func decodeJSONResponse(resp *http.Response, dst any) error {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if err := classifyHTTPError(resp.StatusCode); err != nil {
-			return err
-		}
-		return &HTTPError{Status: resp.StatusCode, Message: strings.TrimSpace(string(body))}
+		return mapHTTPError(resp.StatusCode, body)
 	}
 
 	if dst == nil || len(body) == 0 {
