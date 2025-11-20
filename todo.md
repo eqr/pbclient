@@ -198,28 +198,28 @@ A Go client library for PocketBase with automatic token management, generic repo
 ## Phase 6: Testing
 
 ### Client Tests (`client_test.go`)
-- [ ] Test authentication flow
-- [ ] Test token expiration and refresh
+- [x] Test authentication flow
+- [x] Test token expiration and refresh
 - [ ] Test concurrent requests with token refresh
-- [ ] Test auth failure handling
-- [ ] Test 401/403 token clearing
-- [ ] Mock HTTP responses with httptest
+- [x] Test auth failure handling
+- [x] Test 401/403 token clearing
+- [x] Mock HTTP responses with httptest
 
 ### Repository Tests (`repository_test.go`)
-- [ ] Test CRUD operations
-- [ ] Test List with pagination
-- [ ] Test List with filters
-- [ ] Test error handling (404, 401, etc.)
-- [ ] Test type marshaling/unmarshaling
-- [ ] Integration tests with real PocketBase (optional)
+- [x] Test CRUD operations
+- [x] Test List with pagination
+- [x] Test List with filters
+- [x] Test error handling (404, 401, etc.)
+- [x] Test type marshaling/unmarshaling
+- [x] Integration tests with real PocketBase (optional)
 
 ### KV Store Tests (`kv_test.go`)
-- [ ] Test Set/Get operations
-- [ ] Test upsert behavior (Set on existing key)
-- [ ] Test Delete operations
-- [ ] Test Exists operation
-- [ ] Test List with prefix
-- [ ] Test value marshaling for complex types
+- [x] Test Set/Get operations
+- [x] Test upsert behavior (Set on existing key)
+- [x] Test Delete operations
+- [x] Test Exists operation
+- [x] Test List with prefix
+- [x] Test value marshaling for complex types
 - [ ] Test concurrent access
 
 ### Test Coverage
