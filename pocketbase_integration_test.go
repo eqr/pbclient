@@ -4,7 +4,11 @@ package pbclient
 
 import (
 	"context"
+	"go/build"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime/debug"
 	"testing"
 	"time"
 
@@ -31,12 +35,7 @@ func TestRepositoryAgainstPocketBase(t *testing.T) {
 	client.token = token
 	client.tokenExpires = time.Now().Add(time.Hour)
 
-	type demoRecord struct {
-		ID   string `json:"id"`
-		Text string `json:"text"`
-	}
-
-	repo := NewRepository[demoRecord](client, "demo1")
+	repo := NewRepository[map[string]any](client, "demo2")
 
 	ctx := context.Background()
 
@@ -48,37 +47,43 @@ func TestRepositoryAgainstPocketBase(t *testing.T) {
 		t.Fatalf("expected seeded demo records")
 	}
 
-	created, err := repo.Create(ctx, demoRecord{Text: "pbclient integration"})
+	created, err := repo.Create(ctx, map[string]any{"title": "pbclient integration"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if created.ID == "" || created.Text != "pbclient integration" {
-		t.Fatalf("Create returned unexpected record: %+v", created)
+	createdMap := *created
+	id, _ := createdMap["id"].(string)
+	title, _ := createdMap["title"].(string)
+	if id == "" || title != "pbclient integration" {
+		t.Fatalf("Create returned unexpected record: %+v", createdMap)
 	}
 
-	fetched, err := repo.Get(ctx, created.ID)
+	fetched, err := repo.Get(ctx, id)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if fetched.Text != created.Text {
-		t.Fatalf("Get mismatch: got %q want %q", fetched.Text, created.Text)
+	fetchedMap := *fetched
+	if fetchedMap["title"] != title {
+		t.Fatalf("Get mismatch: got %v want %v", fetchedMap["title"], title)
 	}
 
-	updated, err := repo.Update(ctx, created.ID, demoRecord{Text: "pbclient updated"})
+	updated, err := repo.Update(ctx, id, map[string]any{"title": "pbclient updated"})
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	if updated.Text != "pbclient updated" {
-		t.Fatalf("Update mismatch: got %q", updated.Text)
+	updatedMap := *updated
+	if updatedMap["title"] != "pbclient updated" {
+		t.Fatalf("Update mismatch: got %v", updatedMap["title"])
 	}
 
-	if err := repo.Delete(ctx, created.ID); err != nil {
+	if err := repo.Delete(ctx, id); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 }
 
 func newPocketBaseServer(t testing.TB) (*tests.TestApp, *httptest.Server) {
-	app, err := tests.NewTestApp()
+	dataDir := pocketBaseDataDir(t)
+	app, err := tests.NewTestApp(dataDir)
 	if err != nil {
 		t.Fatalf("init test app: %v", err)
 	}
@@ -117,4 +122,31 @@ func newAuthToken(t testing.TB, app *tests.TestApp, collection, email string) st
 		t.Fatalf("generate auth token: %v", err)
 	}
 	return token
+}
+
+func pocketBaseDataDir(t testing.TB) string {
+	version := pocketBaseVersion()
+	candidates := []string{
+		filepath.Join("vendor", "github.com", "pocketbase", "pocketbase", "tests", "data"),
+		filepath.Join(build.Default.GOPATH, "pkg", "mod", "github.com", "pocketbase", "pocketbase@"+version, "tests", "data"),
+	}
+	for _, dir := range candidates {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	t.Skipf("PocketBase test data not found (looked in %v)", candidates)
+	return ""
+}
+
+func pocketBaseVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info != nil {
+		for _, dep := range info.Deps {
+			if dep.Path == "github.com/pocketbase/pocketbase" {
+				return dep.Version
+			}
+		}
+	}
+	// fallback to known version in go.mod
+	return "v0.31.0"
 }
