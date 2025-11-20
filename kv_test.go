@@ -82,7 +82,7 @@ func TestKVListWithPrefix(t *testing.T) {
 
 	store := NewKVStore(client, "")
 
-	for _, key := range []string{"apple", "apricot", "banana"} {
+	for _, key := range []string{"apple", "apricot", "banana", "apartment"} {
 		if err := store.Set(context.Background(), key, 1); err != nil {
 			t.Fatalf("seed Set %s: %v", key, err)
 		}
@@ -93,8 +93,64 @@ func TestKVListWithPrefix(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 
-	if len(keys) != 2 || keys[0] != "apple" || keys[1] != "apricot" {
-		t.Fatalf("List returned %v, want [apple apricot]", keys)
+	if len(keys) != 3 {
+		t.Fatalf("List returned %v, want 3 keys", keys)
+	}
+	expect := map[string]bool{"apple": true, "apricot": true, "apartment": true}
+	for _, k := range keys {
+		if !expect[k] {
+			t.Fatalf("unexpected key %q in %v", k, keys)
+		}
+	}
+}
+
+func TestKVMarshalComplexValue(t *testing.T) {
+	server := newKVTestServer(t)
+	client := server.client()
+	defer server.close()
+
+	store := NewKVStore(client, "")
+	type data struct {
+		Numbers []int `json:"numbers"`
+		Flag    bool  `json:"flag"`
+	}
+
+	want := data{Numbers: []int{1, 2, 3}, Flag: true}
+	if err := store.Set(context.Background(), "complex", want); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	var got data
+	if err := store.Get(context.Background(), "complex", &got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Numbers) != len(want.Numbers) || got.Flag != want.Flag {
+		t.Fatalf("unexpected value: %+v", got)
+	}
+}
+
+func TestKVListPagination(t *testing.T) {
+	server := newKVTestServer(t)
+	client := server.client()
+	defer server.close()
+
+	store := NewKVStore(client, "")
+	for i := 0; i < 250; i++ {
+		key := "key" + strconv.Itoa(i)
+		if err := store.Set(context.Background(), key, i); err != nil {
+			t.Fatalf("seed Set %s: %v", key, err)
+		}
+	}
+
+	keys, err := store.List(context.Background(), "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(keys) != 250 {
+		t.Fatalf("expected 250 keys, got %d", len(keys))
+	}
+	if keys[0] != "key0" || keys[len(keys)-1] != "key99" {
+		t.Fatalf("unexpected ordering, first %s last %s", keys[0], keys[len(keys)-1])
 	}
 }
 
