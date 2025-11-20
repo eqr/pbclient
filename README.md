@@ -119,3 +119,16 @@ go test -tags=integration ./...
 ```
 
 It reuses PocketBase's bundled test data under GOPATH.
+
+## License
+
+MIT – see `LICENSE` for details.
+
+## Release Notes (v0.0.1)
+
+- Client with lazy admin auth, retries, and token refresh.
+- Generic repository with CRUD, filtering, pagination helpers.
+- KV store abstraction on top of collections.
+- Filter builders (`Eq`, `Gt`, `And`, etc.).
+- PocketBase-aware error mapping.
+- Extensive unit tests and an optional integration test.
