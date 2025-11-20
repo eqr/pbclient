@@ -1,0 +1,226 @@
+package pbclient
+
+import (
+    "bytes"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "net/http"
+    "strings"
+    "sync"
+    "time"
+
+    "log/slog"
+)
+
+// Client provides authenticated HTTP access to PocketBase.
+type Client struct {
+    baseURL       string
+    token         string
+    tokenExpires  time.Time
+    adminEmail    string
+    adminPassword string
+    httpClient    *http.Client
+    tokenMutex    sync.RWMutex
+    logger        *slog.Logger
+}
+
+// ClientOption configures optional Client settings.
+type ClientOption func(*Client)
+
+// WithHTTPClient overrides the default http.Client.
+func WithHTTPClient(client *http.Client) ClientOption {
+    return func(c *Client) {
+        if client != nil {
+            c.httpClient = client
+        }
+    }
+}
+
+// WithLogger attaches a logger used for debug information.
+func WithLogger(logger *slog.Logger) ClientOption {
+    return func(c *Client) {
+        c.logger = logger
+    }
+}
+
+// WithTimeout sets the HTTP client timeout.
+func WithTimeout(timeout time.Duration) ClientOption {
+    return func(c *Client) {
+        if c.httpClient == nil {
+            c.httpClient = defaultHTTPClient()
+        }
+        c.httpClient.Timeout = timeout
+    }
+}
+
+// NewClient constructs a PocketBase client without performing authentication.
+func NewClient(baseURL, adminEmail, adminPassword string, opts ...ClientOption) (*Client, error) {
+    baseURL = strings.TrimSpace(baseURL)
+    adminEmail = strings.TrimSpace(adminEmail)
+
+    if baseURL == "" {
+        return nil, errors.New("baseURL is required")
+    }
+    if adminEmail == "" {
+        return nil, errors.New("admin email is required")
+    }
+    if adminPassword == "" {
+        return nil, errors.New("admin password is required")
+    }
+
+    client := &Client{
+        baseURL:       strings.TrimRight(baseURL, "/"),
+        adminEmail:    adminEmail,
+        adminPassword: adminPassword,
+        httpClient:    defaultHTTPClient(),
+    }
+
+    for _, opt := range opts {
+        if opt != nil {
+            opt(client)
+        }
+    }
+    if client.httpClient == nil {
+        client.httpClient = defaultHTTPClient()
+    }
+
+    return client, nil
+}
+
+// authenticate logs in and stores the access token.
+func (c *Client) authenticate() error {
+    payload := map[string]string{
+        "identity": c.adminEmail,
+        "password": c.adminPassword,
+    }
+
+    var buf bytes.Buffer
+    if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+        return fmt.Errorf("encode auth payload: %w", err)
+    }
+
+    url := c.baseURL + "/api/collections/users/auth-with-password"
+    req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, &buf)
+    if err != nil {
+        return fmt.Errorf("build auth request: %w", err)
+    }
+    req.Header.Set("Content-Type", "application/json")
+
+    resp, err := c.httpClient.Do(req)
+    if err != nil {
+        return fmt.Errorf("authentication request failed: %w", err)
+    }
+    defer resp.Body.Close()
+
+    body, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return fmt.Errorf("read auth response: %w", err)
+    }
+
+    if resp.StatusCode != http.StatusOK {
+        c.clearToken()
+        sentinel := classifyHTTPError(resp.StatusCode)
+        if sentinel != nil {
+            return sentinel
+        }
+        return &HTTPError{Status: resp.StatusCode, Message: strings.TrimSpace(string(body))}
+    }
+
+    var authResp struct {
+        Token string `json:"token"`
+    }
+    if err := json.Unmarshal(body, &authResp); err != nil {
+        return fmt.Errorf("parse auth response: %w", err)
+    }
+    if authResp.Token == "" {
+        return errors.New("authentication succeeded but token missing")
+    }
+
+    expiry := time.Now().Add(23 * time.Hour)
+    c.tokenMutex.Lock()
+    c.token = authResp.Token
+    c.tokenExpires = expiry
+    c.tokenMutex.Unlock()
+
+    if c.logger != nil {
+        c.logger.Info("authenticated with PocketBase", "expires", expiry)
+    }
+    return nil
+}
+
+// ensureAuthenticated lazily obtains or refreshes a token when needed.
+func (c *Client) ensureAuthenticated() error {
+    if c.tokenValid() {
+        return nil
+    }
+    return c.authenticate()
+}
+
+// doRequest executes an authenticated HTTP request to PocketBase.
+func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+    if ctx == nil {
+        ctx = context.Background()
+    }
+    if err := c.ensureAuthenticated(); err != nil {
+        return nil, err
+    }
+
+    token := c.readToken()
+    url := c.baseURL + "/" + strings.TrimLeft(path, "/")
+
+    req, err := http.NewRequestWithContext(ctx, method, url, body)
+    if err != nil {
+        return nil, fmt.Errorf("build request: %w", err)
+    }
+
+    if token != "" {
+        req.Header.Set("Authorization", "Bearer "+token)
+    }
+    if body != nil {
+        req.Header.Set("Content-Type", "application/json")
+    }
+
+    resp, err := c.httpClient.Do(req)
+    if err != nil {
+        return nil, err
+    }
+
+    if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+        c.clearToken()
+    }
+
+    return resp, nil
+}
+
+func (c *Client) tokenValid() bool {
+    c.tokenMutex.RLock()
+    defer c.tokenMutex.RUnlock()
+
+    if c.token == "" {
+        return false
+    }
+    if c.tokenExpires.IsZero() {
+        return true
+    }
+    return time.Now().Before(c.tokenExpires)
+}
+
+func (c *Client) readToken() string {
+    c.tokenMutex.RLock()
+    defer c.tokenMutex.RUnlock()
+    return c.token
+}
+
+func (c *Client) clearToken() {
+    c.tokenMutex.Lock()
+    defer c.tokenMutex.Unlock()
+    c.token = ""
+    c.tokenExpires = time.Time{}
+}
+
+func defaultHTTPClient() *http.Client {
+    return &http.Client{Timeout: 30 * time.Second}
+}

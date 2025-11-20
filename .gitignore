@@ -1,0 +1,25 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Output of the go coverage tool
+*.cover
+*.coverprofile
+coverage/
+
+# IDE/editor clutter
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+bin/
+obj/
+
+autom4te.cache
