@@ -16,6 +16,7 @@ import (
 )
 
 // Client provides authenticated HTTP access to PocketBase.
+// It is safe for concurrent use.
 type Client struct {
 	baseURL       string
 	token         string
@@ -73,6 +74,7 @@ func WithRetry(maxRetries int, backoff time.Duration) ClientOption {
 }
 
 // NewClient constructs a PocketBase client without performing authentication.
+// Use ClientOptions to set timeouts, retries, logging, or custom transports.
 func NewClient(baseURL, adminEmail, adminPassword string, opts ...ClientOption) (*Client, error) {
 	baseURL = strings.TrimSpace(baseURL)
 	adminEmail = strings.TrimSpace(adminEmail)
@@ -172,6 +174,7 @@ func (c *Client) ensureAuthenticated() error {
 }
 
 // doRequest executes an authenticated HTTP request to PocketBase with optional retries.
+// It handles token refresh, 401/403 clearing, and exponential backoff on 429/network failures.
 func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()

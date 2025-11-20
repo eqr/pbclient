@@ -230,26 +230,26 @@ A Go client library for PocketBase with automatic token management, generic repo
 ## Phase 7: Documentation
 
 ### README.md
-- [ ] Overview and features
-- [ ] Installation instructions
-- [ ] Quick start guide
-- [ ] Client configuration examples
-- [ ] Repository pattern usage examples
-- [ ] KV store usage examples
-- [ ] Error handling guide
-- [ ] Thread safety guarantees
+- [x] Overview and features
+- [x] Installation instructions
+- [x] Quick start guide
+- [x] Client configuration examples
+- [x] Repository pattern usage examples
+- [x] KV store usage examples
+- [x] Error handling guide
+- [x] Thread safety guarantees
 - [ ] Comparison with existing libraries
 - [ ] License (MIT or Apache 2.0)
 
 ### Code Documentation
-- [ ] Add godoc comments to all public types
-- [ ] Add godoc comments to all public methods
+- [x] Add godoc comments to all public types
+- [x] Add godoc comments to all public methods
 - [ ] Add usage examples in godoc
-- [ ] Document thread safety
+- [x] Document thread safety
 
 ### Examples
-- [ ] `examples/repository_example.go` - Full CRUD example
-- [ ] `examples/kv_example.go` - KV store example
+- [x] `examples/repository_example.go` - Full CRUD example
+- [x] `examples/kv_example.go` - KV store example
 - [ ] Example with custom types
 - [ ] Example with filters and pagination
 
