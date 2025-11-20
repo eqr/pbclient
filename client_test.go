@@ -70,6 +70,110 @@ func TestClientRetriesNetworkErrors(t *testing.T) {
 	}
 }
 
+func TestAuthenticateSuccessAndFailure(t *testing.T) {
+	var authCalls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/collections/users/auth-with-password":
+			authCalls++
+			if r.Method != http.MethodPost {
+				http.Error(w, "bad method", http.StatusBadRequest)
+				return
+			}
+			if authCalls == 1 {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"token":"tok1"}`))
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"invalid"}`))
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	client, err := NewClient(ts.URL, "admin@example.com", "password", WithHTTPClient(ts.Client()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// success
+	if err := client.authenticate(); err != nil {
+		t.Fatalf("authenticate success: %v", err)
+	}
+	if client.readToken() != "tok1" {
+		t.Fatalf("expected token tok1, got %q", client.readToken())
+	}
+	if client.tokenExpires.IsZero() {
+		t.Fatalf("expected token expiry set")
+	}
+
+	// failure clears token
+	if err := client.authenticate(); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+	if client.readToken() != "" {
+		t.Fatalf("token should be cleared after failure")
+	}
+	if !client.tokenExpires.IsZero() {
+		t.Fatalf("token expiry should be cleared after failure")
+	}
+}
+
+func TestEnsureAuthenticatedRefreshOnExpiry(t *testing.T) {
+	var authCalls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authCalls++
+		_, _ = w.Write([]byte(`{"token":"fresh"}`))
+	}))
+	defer ts.Close()
+
+	client, err := NewClient(ts.URL, "admin@example.com", "password", WithHTTPClient(ts.Client()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	client.token = "stale"
+	client.tokenExpires = time.Now().Add(-time.Minute)
+
+	if err := client.ensureAuthenticated(); err != nil {
+		t.Fatalf("ensureAuthenticated: %v", err)
+	}
+	if authCalls != 1 {
+		t.Fatalf("expected one auth call, got %d", authCalls)
+	}
+	if client.readToken() != "fresh" {
+		t.Fatalf("expected refreshed token, got %q", client.readToken())
+	}
+}
+
+func TestDoRequestClearsTokenOnUnauthorized(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/collections/users/auth-with-password" {
+			_, _ = w.Write([]byte(`{"token":"ok"}`))
+			return
+		}
+		http.Error(w, "denied", http.StatusUnauthorized)
+	}))
+	defer ts.Close()
+
+	client, err := NewClient(ts.URL, "admin@example.com", "password", WithHTTPClient(ts.Client()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	resp, err := client.doRequest(context.Background(), http.MethodGet, "/anything", nil)
+	if err != nil {
+		t.Fatalf("doRequest: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if client.readToken() != "" {
+		t.Fatalf("token should be cleared on 401")
+	}
+}
+
 type flakyTransport struct {
 	failFor int
 	calls   int
