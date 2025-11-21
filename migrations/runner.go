@@ -25,6 +25,8 @@ type Runner struct {
 	autoCreate     bool
 }
 
+const ruleAuthenticated = "@request.auth.id != ''"
+
 // Option configures the Runner.
 type Option func(*Runner)
 
@@ -264,8 +266,13 @@ func (r *Runner) ensureCollection(ctx context.Context) error {
 
 func (r *Runner) createCollection(ctx context.Context, name string) error {
 	payload := map[string]interface{}{
-		"name": name,
-		"type": "base",
+		"name":       name,
+		"type":       "base",
+		"listRule":   ruleAuthenticated,
+		"viewRule":   ruleAuthenticated,
+		"createRule": ruleAuthenticated,
+		"updateRule": ruleAuthenticated,
+		"deleteRule": ruleAuthenticated,
 		"fields": []map[string]interface{}{
 			{"name": "name", "type": "text", "required": true},
 			{"name": "applied_at", "type": "date", "required": true},
