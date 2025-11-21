@@ -50,6 +50,21 @@ func WithLogger(logger *slog.Logger) ClientOption {
 	}
 }
 
+// WithAuthToken seeds the client with an existing authentication token and optional expiry.
+// If token is empty, this option does nothing.
+func WithAuthToken(token string, expires time.Time) ClientOption {
+	trimmed := strings.TrimSpace(token)
+	return func(c *Client) {
+		if trimmed == "" {
+			return
+		}
+		c.tokenMutex.Lock()
+		defer c.tokenMutex.Unlock()
+		c.token = trimmed
+		c.tokenExpires = expires
+	}
+}
+
 // WithTimeout sets the HTTP client timeout.
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *Client) {

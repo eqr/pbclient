@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	pbclient "github.com/eqr/pbclient"
@@ -18,6 +19,7 @@ import (
 
 // Runner executes registered migrations against PocketBase and records progress.
 type Runner struct {
+	mu             sync.RWMutex
 	client         *pbclient.Client
 	migrations     []Migration
 	collectionName string
@@ -34,9 +36,7 @@ type Option func(*Runner)
 func WithCollectionName(name string) Option {
 	trimmed := strings.TrimSpace(name)
 	return func(r *Runner) {
-		if trimmed != "" {
-			r.collectionName = trimmed
-		}
+		r.collectionName = trimmed
 	}
 }
 
@@ -63,10 +63,6 @@ func NewRunner(client *pbclient.Client, opts ...Option) *Runner {
 		}
 	}
 
-	if r.collectionName == "" {
-		r.collectionName = defaultCollectionName
-	}
-
 	return r
 }
 
@@ -80,6 +76,9 @@ func (r *Runner) Register(m Migration) error {
 	if name == "" {
 		return errors.New("migration name is required")
 	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	if _, exists := r.byName[name]; exists {
 		return fmt.Errorf("%w: %s", ErrDuplicateMigration, name)
@@ -189,17 +188,16 @@ func (r *Runner) Down(ctx context.Context, n int) error {
 		return err
 	}
 
-	sort.Slice(applied, func(i, j int) bool {
-		return applied[i].AppliedAt.After(applied[j].AppliedAt)
-	})
-
 	if n > len(applied) {
 		n = len(applied)
 	}
 
-	for i := 0; i < n; i++ {
+	for i := len(applied) - 1; i >= len(applied)-n; i-- {
 		rec := applied[i]
+
+		r.mu.RLock()
 		mig := r.byName[rec.Name]
+		r.mu.RUnlock()
 		if mig == nil {
 			return fmt.Errorf("%w: %s", ErrMigrationNotFound, rec.Name)
 		}
@@ -217,8 +215,10 @@ func (r *Runner) Down(ctx context.Context, n int) error {
 }
 
 func (r *Runner) sortedMigrations() []Migration {
+	r.mu.RLock()
 	copySlice := make([]Migration, len(r.migrations))
 	copy(copySlice, r.migrations)
+	r.mu.RUnlock()
 
 	sort.Slice(copySlice, func(i, j int) bool {
 		return strings.TrimSpace(copySlice[i].Name()) < strings.TrimSpace(copySlice[j].Name())
@@ -330,8 +330,8 @@ func (r *Runner) fetchApplied(ctx context.Context) ([]Record, error) {
 		page++
 	}
 
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].AppliedAt.Before(all[j].AppliedAt)
+	sort.SliceStable(all, func(i, j int) bool {
+		return all[i].AppliedAt.Before(all[j].AppliedAt.Time)
 	})
 
 	return all, nil
@@ -341,7 +341,7 @@ func (r *Runner) recordMigration(ctx context.Context, name string) error {
 	repo := pbclient.NewRepository[Record](r.client, r.collectionName)
 	_, err := repo.Create(ctx, Record{
 		Name:      name,
-		AppliedAt: time.Now().UTC(),
+		AppliedAt: PBTime{Time: time.Now().UTC()},
 	})
 	return err
 }

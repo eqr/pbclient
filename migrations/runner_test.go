@@ -176,6 +176,22 @@ func TestEnsureCollectionNotCreatedWhenAutoCreateDisabled(t *testing.T) {
 	}
 }
 
+func TestCollectionNameRequired(t *testing.T) {
+	server := newMigrationTestServer(t)
+	t.Cleanup(server.close)
+
+	client := server.client()
+	runner := NewRunner(client, WithCollectionName("   "))
+
+	err := runner.Run(context.Background())
+	if err == nil {
+		t.Fatalf("expected error when collection name is empty")
+	}
+	if !strings.Contains(err.Error(), "collection name is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // --- test helpers ---
 
 type stubMigration struct {
@@ -232,7 +248,7 @@ func (s *migrationTestServer) addRecord(name string, appliedAt time.Time) {
 	s.records = append(s.records, Record{
 		ID:        strconv.Itoa(s.nextID),
 		Name:      name,
-		AppliedAt: appliedAt,
+		AppliedAt: PBTime{Time: appliedAt},
 	})
 	s.nextID++
 }
@@ -295,7 +311,7 @@ func (s *migrationTestServer) handleList(w http.ResponseWriter, r *http.Request)
 	sorted := make([]Record, len(s.records))
 	copy(sorted, s.records)
 	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].AppliedAt.Before(sorted[j].AppliedAt)
+		return sorted[i].AppliedAt.Before(sorted[j].AppliedAt.Time)
 	})
 
 	totalItems := len(sorted)
@@ -333,7 +349,7 @@ func (s *migrationTestServer) handleCreateRecord(w http.ResponseWriter, r *http.
 	rec.ID = strconv.Itoa(s.nextID)
 	s.nextID++
 	if rec.AppliedAt.IsZero() {
-		rec.AppliedAt = time.Now().UTC()
+		rec.AppliedAt = PBTime{Time: time.Now().UTC()}
 	}
 	s.records = append(s.records, rec)
 

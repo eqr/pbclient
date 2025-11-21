@@ -59,6 +59,7 @@ func main() {
 - `WithTimeout(time.Duration)`: set HTTP timeout.
 - `WithRetry(maxRetries, backoff)`: retry 429/network errors with exponential backoff.
 - `WithLogger(*slog.Logger)`: structured logging for auth and retries.
+- `WithAuthToken(token, expires)`: seed an existing auth token instead of logging in.
 
 ## Repository Usage
 
@@ -119,6 +120,21 @@ go test -tags=integration ./...
 ```
 
 It reuses PocketBase's bundled test data under GOPATH.
+
+## Migrations
+
+The `migrations` package ships an HTTP-based runner. By default it auto-creates a `pb_migrations` collection with authenticated-only rules and records applied migration names/timestamps. Example:
+
+```go
+runner := migrations.NewRunner(client) // auto-creates pb_migrations with auth-only access rules
+_ = runner.Register(migrations.MyFirstMigration{})
+_ = runner.Run(ctx)
+
+pending, _ := runner.Pending(ctx)
+_ = runner.Down(ctx, 1) // roll back latest
+```
+
+To disable auto-creation and require a pre-provisioned collection, pass `migrations.WithAutoCreate(false)`; the runner will return `ErrCollectionNotFound` if the collection is missing.
 
 ## License
 
