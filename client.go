@@ -251,6 +251,12 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	return nil, errors.New("request failed after retries")
 }
 
+// Do executes an authenticated HTTP request with retries.
+// Callers must close the returned response body.
+func (c *Client) Do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	return c.doRequest(ctx, method, path, body)
+}
+
 func (c *Client) wait(ctx context.Context, attempt int) error {
 	backoff := c.backoff
 	if backoff <= 0 {
