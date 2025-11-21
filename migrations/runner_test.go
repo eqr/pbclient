@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,6 +192,64 @@ func TestCollectionNameRequired(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "collection name is required") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRegisterConcurrentSafety(t *testing.T) {
+	runner := NewRunner(nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := fmt.Sprintf("mig_%02d", i)
+			_ = runner.Register(stubMigration{name: name})
+		}()
+	}
+
+	wg.Wait()
+
+	if got := len(runner.sortedMigrations()); got != 20 {
+		t.Fatalf("expected 20 migrations registered, got %d", got)
+	}
+}
+
+func TestRunSerialized(t *testing.T) {
+	server := newMigrationTestServer(t)
+	server.collectionExists = true
+	t.Cleanup(server.close)
+
+	client := server.client()
+	runner := NewRunner(client)
+
+	var upCalls atomic.Int64
+	m := stubMigration{name: "202401_alpha", up: func(*pbclient.Client) error {
+		time.Sleep(50 * time.Millisecond)
+		upCalls.Add(1)
+		return nil
+	}}
+
+	if err := runner.Register(m); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = runner.Run(context.Background())
+		}()
+	}
+	wg.Wait()
+
+	if upCalls.Load() != 1 {
+		t.Fatalf("expected Up called once, got %d", upCalls.Load())
+	}
+	if len(server.records) != 1 {
+		t.Fatalf("expected one record, got %d", len(server.records))
 	}
 }
 

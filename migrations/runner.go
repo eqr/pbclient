@@ -19,12 +19,13 @@ import (
 
 // Runner executes registered migrations against PocketBase and records progress.
 type Runner struct {
-	mu             sync.RWMutex
-	client         *pbclient.Client
-	migrations     []Migration
-	collectionName string
-	byName         map[string]Migration
-	autoCreate     bool
+	runMu         sync.Mutex
+	mu            sync.RWMutex
+	client        *pbclient.Client
+	migrations    []Migration
+	logCollection string
+	byName        map[string]Migration
+	autoCreate    bool
 }
 
 const ruleAuthenticated = "@request.auth.id != ''"
@@ -32,13 +33,17 @@ const ruleAuthenticated = "@request.auth.id != ''"
 // Option configures the Runner.
 type Option func(*Runner)
 
-// WithCollectionName overrides the default migrations collection name.
+// WithCollectionName overrides the default migrations log collection name.
 func WithCollectionName(name string) Option {
 	trimmed := strings.TrimSpace(name)
 	return func(r *Runner) {
-		r.collectionName = trimmed
+		r.logCollection = trimmed
 	}
 }
+
+// WithLogCollectionName overrides the default migrations log collection name.
+// Alias for WithCollectionName for clarity.
+func WithLogCollectionName(name string) Option { return WithCollectionName(name) }
 
 // WithAutoCreate controls whether the migrations collection is created automatically when missing.
 // Defaults to true.
@@ -51,10 +56,10 @@ func WithAutoCreate(autoCreate bool) Option {
 // NewRunner constructs a Runner with optional configuration.
 func NewRunner(client *pbclient.Client, opts ...Option) *Runner {
 	r := &Runner{
-		client:         client,
-		collectionName: defaultCollectionName,
-		byName:         make(map[string]Migration),
-		autoCreate:     true,
+		client:        client,
+		logCollection: defaultCollectionName,
+		byName:        make(map[string]Migration),
+		autoCreate:    true,
 	}
 
 	for _, opt := range opts {
@@ -101,6 +106,9 @@ func (r *Runner) RegisterAll(migrations ...Migration) error {
 
 // Run executes pending migrations in name order.
 func (r *Runner) Run(ctx context.Context) error {
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
+
 	if err := r.ensureCollection(ctx); err != nil {
 		return err
 	}
@@ -137,6 +145,9 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // Pending returns registered migrations that have not been applied.
 func (r *Runner) Pending(ctx context.Context) ([]Migration, error) {
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
+
 	if err := r.ensureCollection(ctx); err != nil {
 		return nil, err
 	}
@@ -167,6 +178,9 @@ func (r *Runner) Pending(ctx context.Context) ([]Migration, error) {
 
 // Applied returns the migration records stored in PocketBase.
 func (r *Runner) Applied(ctx context.Context) ([]Record, error) {
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
+
 	if err := r.ensureCollection(ctx); err != nil {
 		return nil, err
 	}
@@ -178,6 +192,9 @@ func (r *Runner) Down(ctx context.Context, n int) error {
 	if n <= 0 {
 		return nil
 	}
+
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
 
 	if err := r.ensureCollection(ctx); err != nil {
 		return err
@@ -232,7 +249,7 @@ func (r *Runner) ensureCollection(ctx context.Context) error {
 		return errors.New("runner client is nil")
 	}
 
-	name := strings.TrimSpace(r.collectionName)
+	name := strings.TrimSpace(r.logCollection)
 	if name == "" {
 		return errors.New("collection name is required")
 	}
@@ -309,7 +326,7 @@ func (r *Runner) fetchApplied(ctx context.Context) ([]Record, error) {
 		return nil, errors.New("runner client is nil")
 	}
 
-	repo := pbclient.NewRepository[Record](r.client, r.collectionName)
+	repo := pbclient.NewRepository[Record](r.client, r.logCollection)
 	all := make([]Record, 0)
 
 	page := 1
@@ -338,7 +355,7 @@ func (r *Runner) fetchApplied(ctx context.Context) ([]Record, error) {
 }
 
 func (r *Runner) recordMigration(ctx context.Context, name string) error {
-	repo := pbclient.NewRepository[Record](r.client, r.collectionName)
+	repo := pbclient.NewRepository[Record](r.client, r.logCollection)
 	_, err := repo.Create(ctx, Record{
 		Name:      name,
 		AppliedAt: PBTime{Time: time.Now().UTC()},
@@ -347,7 +364,7 @@ func (r *Runner) recordMigration(ctx context.Context, name string) error {
 }
 
 func (r *Runner) deleteMigration(ctx context.Context, record Record) error {
-	repo := pbclient.NewRepository[Record](r.client, r.collectionName)
+	repo := pbclient.NewRepository[Record](r.client, r.logCollection)
 	id := strings.TrimSpace(record.ID)
 	if id == "" {
 		return fmt.Errorf("%w: missing id for %s", ErrMigrationNotFound, record.Name)
