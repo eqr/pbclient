@@ -14,21 +14,23 @@ import (
 	"sync"
 	"time"
 
-	pbclient "github.com/eqr/pbclient"
+	"github.com/eqr/pbclient"
 )
 
 // Runner executes registered migrations against PocketBase and records progress.
 type Runner struct {
 	runMu         sync.Mutex
 	mu            sync.RWMutex
-	client        *pbclient.Client
+	client        pbclient.AuthenticatedClient
 	migrations    []Migration
 	logCollection string
+	appName       string
 	byName        map[string]Migration
 	autoCreate    bool
 }
 
-const ruleAuthenticated = "@request.auth.id != ''"
+// RuleAuthenticated restricts access to authenticated PocketBase users.
+const RuleAuthenticated = "@request.auth.id != ''"
 
 // Option configures the Runner.
 type Option func(*Runner)
@@ -53,8 +55,17 @@ func WithAutoCreate(autoCreate bool) Option {
 	}
 }
 
+// WithAppName sets the application name for multi-app migration tracking.
+// When set, migrations will be filtered by appname.
+func WithAppName(appName string) Option {
+	trimmed := strings.TrimSpace(appName)
+	return func(r *Runner) {
+		r.appName = trimmed
+	}
+}
+
 // NewRunner constructs a Runner with optional configuration.
-func NewRunner(client *pbclient.Client, opts ...Option) *Runner {
+func NewRunner(client pbclient.AuthenticatedClient, opts ...Option) *Runner {
 	r := &Runner{
 		client:        client,
 		logCollection: defaultCollectionName,
@@ -254,7 +265,8 @@ func (r *Runner) ensureCollection(ctx context.Context) error {
 		return errors.New("collection name is required")
 	}
 
-	path := fmt.Sprintf("/api/collections/%s", url.PathEscape(name))
+	// Try to query records endpoint instead of admin API - works with ordinary permissions
+	path := fmt.Sprintf("/api/collections/%s/records?perPage=1", url.PathEscape(name))
 	resp, err := r.client.Do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return err
@@ -285,16 +297,17 @@ func (r *Runner) createCollection(ctx context.Context, name string) error {
 	payload := map[string]interface{}{
 		"name":       name,
 		"type":       "base",
-		"listRule":   ruleAuthenticated,
-		"viewRule":   ruleAuthenticated,
-		"createRule": ruleAuthenticated,
-		"updateRule": ruleAuthenticated,
-		"deleteRule": ruleAuthenticated,
+		"listRule":   RuleAuthenticated,
+		"viewRule":   RuleAuthenticated,
+		"createRule": RuleAuthenticated,
+		"updateRule": RuleAuthenticated,
+		"deleteRule": RuleAuthenticated,
 		"fields": []map[string]interface{}{
+			{"name": "appname", "type": "text", "required": true},
 			{"name": "name", "type": "text", "required": true},
 			{"name": "applied_at", "type": "date", "required": true},
 		},
-		"indexes": []string{fmt.Sprintf("CREATE UNIQUE INDEX idx_%s_name ON %s(name)", name, name)},
+		"indexes": []string{fmt.Sprintf("CREATE UNIQUE INDEX idx_%s_appname_name ON %s(appname, name)", name, name)},
 	}
 
 	body, err := json.Marshal(payload)
@@ -331,11 +344,18 @@ func (r *Runner) fetchApplied(ctx context.Context) ([]Record, error) {
 
 	page := 1
 	for {
-		res, err := repo.List(ctx, pbclient.ListOptions{
+		opts := pbclient.ListOptions{
 			Page:    page,
 			PerPage: 200,
-			Fields:  []string{"id", "name", "applied_at"},
-		})
+			Fields:  []string{"id", "appname", "name", "applied_at"},
+		}
+
+		// Filter by appname if set
+		if r.appName != "" {
+			opts.Filter = pbclient.Eq("appname", r.appName)
+		}
+
+		res, err := repo.List(ctx, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -357,6 +377,7 @@ func (r *Runner) fetchApplied(ctx context.Context) ([]Record, error) {
 func (r *Runner) recordMigration(ctx context.Context, name string) error {
 	repo := pbclient.NewRepository[Record](r.client, r.logCollection)
 	_, err := repo.Create(ctx, Record{
+		AppName:   r.appName,
 		Name:      name,
 		AppliedAt: PBTime{Time: time.Now().UTC()},
 	})
