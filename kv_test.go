@@ -83,10 +83,10 @@ func TestKVListWithPrefix(t *testing.T) {
 	store := NewKVStore(client, "", "app")
 
 	for _, key := range []string{"apple", "apricot", "banana", "apartment"} {
-		if err := store.Set(context.Background(), key, 1); err != nil {
-			t.Fatalf("seed Set %s: %v", key, err)
-		}
-	}
+        if err := store.Set(context.Background(), key, 1); err != nil {
+            t.Fatalf("seed Set %s: %v", key, err)
+        }
+    }
 
 	keys, err := store.List(context.Background(), "ap")
 	if err != nil {

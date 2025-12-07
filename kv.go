@@ -136,27 +136,9 @@ func (s KVStore) Get(ctx context.Context, key string) (json.RawMessage, error) {
 	return json.RawMessage(str), nil
 }
 
-// GetInto fetches a value for the given key and unmarshals it into dest.
-func (s KVStore) GetInto(ctx context.Context, key string, dest interface{}) error {
-	if dest == nil {
-		return fmt.Errorf("dest must be non-nil")
-	}
-
-	data, err := s.Get(ctx, key)
-	if err != nil {
-		return err
-	}
-
-	if err := json.Unmarshal(data, dest); err != nil {
-		return fmt.Errorf("decode value: %w", err)
-	}
-
-	return nil
-}
-
 // TypedKVStore provides typed helpers built on top of KVStore.
 type TypedKVStore[T any] struct {
-	store KVStore
+    store KVStore
 }
 
 // NewTypedKVStore creates a typed KV store bound to a PocketBase collection.
@@ -171,13 +153,18 @@ func (s TypedKVStore[T]) Set(ctx context.Context, key string, value T) error {
 
 // Get fetches a value for the given key.
 func (s TypedKVStore[T]) Get(ctx context.Context, key string) (T, error) {
-	var zero T
+    var zero T
 
-	var out T
-	if err := s.store.GetInto(ctx, key, &out); err != nil {
-		return zero, err
-	}
-	return out, nil
+    var out T
+    raw, err := s.store.Get(ctx, key)
+    if err != nil {
+        return zero, err
+    }
+
+    if err := json.Unmarshal(raw, &out); err != nil {
+        return zero, err
+    }
+    return out, nil
 }
 
 // Delete removes a key. It is idempotent and returns nil if the key does not exist.
