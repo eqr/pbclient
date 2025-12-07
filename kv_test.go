@@ -17,10 +17,10 @@ func TestKVSetGetAndExists(t *testing.T) {
 	client := server.client()
 	defer server.close()
 
-	store := NewKVStore(client, "")
+	store := NewTypedKVStore[string](client, "", "app")
 
 	// Create new key
-	if err := store.Set(context.Background(), "foo", map[string]int{"bar": 1}); err != nil {
+	if err := store.Set(context.Background(), "foo", "initial"); err != nil {
 		t.Fatalf("Set create: %v", err)
 	}
 
@@ -29,8 +29,8 @@ func TestKVSetGetAndExists(t *testing.T) {
 		t.Fatalf("Set update: %v", err)
 	}
 
-	var value string
-	if err := store.Get(context.Background(), "foo", &value); err != nil {
+	value, err := store.Get(context.Background(), "foo")
+	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if value != "updated" {
@@ -51,7 +51,7 @@ func TestKVDeleteAndIdempotency(t *testing.T) {
 	client := server.client()
 	defer server.close()
 
-	store := NewKVStore(client, "")
+	store := NewKVStore(client, "", "app")
 
 	if err := store.Set(context.Background(), "gone", "value"); err != nil {
 		t.Fatalf("seed Set: %v", err)
@@ -80,7 +80,7 @@ func TestKVListWithPrefix(t *testing.T) {
 	client := server.client()
 	defer server.close()
 
-	store := NewKVStore(client, "")
+	store := NewKVStore(client, "", "app")
 
 	for _, key := range []string{"apple", "apricot", "banana", "apartment"} {
 		if err := store.Set(context.Background(), key, 1); err != nil {
@@ -109,19 +109,19 @@ func TestKVMarshalComplexValue(t *testing.T) {
 	client := server.client()
 	defer server.close()
 
-	store := NewKVStore(client, "")
 	type data struct {
 		Numbers []int `json:"numbers"`
 		Flag    bool  `json:"flag"`
 	}
+	store := NewTypedKVStore[data](client, "", "app")
 
 	want := data{Numbers: []int{1, 2, 3}, Flag: true}
 	if err := store.Set(context.Background(), "complex", want); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 
-	var got data
-	if err := store.Get(context.Background(), "complex", &got); err != nil {
+	got, err := store.Get(context.Background(), "complex")
+	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if len(got.Numbers) != len(want.Numbers) || got.Flag != want.Flag {
@@ -134,7 +134,7 @@ func TestKVListPagination(t *testing.T) {
 	client := server.client()
 	defer server.close()
 
-	store := NewKVStore(client, "")
+	store := NewKVStore(client, "", "app")
 	for i := 0; i < 250; i++ {
 		key := "key" + strconv.Itoa(i)
 		if err := store.Set(context.Background(), key, i); err != nil {
@@ -157,9 +157,10 @@ func TestKVListPagination(t *testing.T) {
 // --- test helpers ---
 
 type kvRecord struct {
-	ID    string `json:"id"`
-	Key   string `json:"key"`
-	Value string `json:"value"`
+	ID      string          `json:"id"`
+	Key     string          `json:"key"`
+	AppName string          `json:"appname"`
+	Value   json.RawMessage `json:"value"`
 }
 
 type kvTestServer struct {
@@ -179,14 +180,20 @@ func newKVTestServer(t *testing.T) *kvTestServer {
 	return s
 }
 
-func (s *kvTestServer) client() *Client {
-	client, err := NewClient(s.ts.URL, "admin@example.com", "password", WithHTTPClient(s.ts.Client()))
+func (s *kvTestServer) storeKey(appName, key string) string {
+	return strings.TrimSpace(appName) + "|" + key
+}
+
+func (s *kvTestServer) client() AuthenticatedClient {
+	raw, err := NewClient(s.ts.URL, WithHTTPClient(s.ts.Client()))
 	if err != nil {
 		s.t.Fatalf("build client: %v", err)
 	}
-	client.token = "test-token"
-	client.tokenExpires = time.Now().Add(time.Hour)
-	return client
+	return &authenticatedClient{
+		client:       raw.(*client),
+		token:        "test-token",
+		tokenExpires: time.Now().Add(time.Hour),
+	}
 }
 
 func (s *kvTestServer) close() {
@@ -194,11 +201,6 @@ func (s *kvTestServer) close() {
 }
 
 func (s *kvTestServer) handle(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasPrefix(r.URL.Path, "/api/collections/kv_store/records") {
-		http.NotFound(w, r)
-		return
-	}
-
 	switch r.Method {
 	case http.MethodGet:
 		s.handleList(w, r)
@@ -218,15 +220,15 @@ func (s *kvTestServer) handleList(w http.ResponseWriter, r *http.Request) {
 	perPage := parseIntDefault(r.URL.Query().Get("perPage"), 30)
 	page := parseIntDefault(r.URL.Query().Get("page"), 1)
 
+	appNameFilter := extractFieldValue(filter, "appname")
 	var match func(kvRecord) bool
 	if strings.Contains(filter, "key~") {
-		raw := extractQuoted(filter)
-		prefix := strings.TrimSuffix(raw, "%")
+		prefix := extractPrefixFilter(filter)
 		match = func(rec kvRecord) bool {
 			return strings.HasPrefix(rec.Key, prefix)
 		}
 	} else if strings.Contains(filter, "key=") {
-		expect := extractQuoted(filter)
+		expect := extractFieldValue(filter, "key")
 		match = func(rec kvRecord) bool {
 			return rec.Key == expect
 		}
@@ -243,6 +245,9 @@ func (s *kvTestServer) handleList(w http.ResponseWriter, r *http.Request) {
 	filtered := make([]kvRecord, 0, len(keys))
 	for _, key := range keys {
 		rec := s.records[key]
+		if appNameFilter != "" && rec.AppName != appNameFilter {
+			continue
+		}
 		if match(rec) {
 			filtered = append(filtered, rec)
 		}
@@ -281,12 +286,13 @@ func (s *kvTestServer) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	payload.ID = strconv.Itoa(s.nextID)
 	s.nextID++
-	s.records[payload.Key] = payload
+	s.records[s.storeKey(payload.AppName, payload.Key)] = payload
 	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *kvTestServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/collections/kv_store/records/")
+	parts := strings.Split(r.URL.Path, "/")
+	id := parts[len(parts)-1]
 	var payload kvRecord
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
@@ -295,7 +301,11 @@ func (s *kvTestServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	for key, rec := range s.records {
 		if rec.ID == id {
 			rec.Value = payload.Value
-			s.records[key] = rec
+			if payload.AppName != "" {
+				rec.AppName = payload.AppName
+			}
+			delete(s.records, key)
+			s.records[s.storeKey(rec.AppName, rec.Key)] = rec
 			writeJSON(w, http.StatusOK, rec)
 			return
 		}
@@ -304,7 +314,8 @@ func (s *kvTestServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *kvTestServer) handleDelete(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/collections/kv_store/records/")
+	parts := strings.Split(r.URL.Path, "/")
+	id := parts[len(parts)-1]
 	for key, rec := range s.records {
 		if rec.ID == id {
 			delete(s.records, key)
@@ -328,6 +339,35 @@ func extractQuoted(filter string) string {
 		return ""
 	}
 	return strings.ReplaceAll(filter[start+1:end], "\\'", "'")
+}
+
+func extractFieldValue(filter, field string) string {
+	needle := field + "='"
+	start := strings.Index(filter, needle)
+	if start == -1 {
+		return ""
+	}
+	start += len(needle)
+	rest := filter[start:]
+	end := strings.Index(rest, "'")
+	if end == -1 {
+		return ""
+	}
+	return strings.ReplaceAll(rest[:end], "\\'", "'")
+}
+
+func extractPrefixFilter(filter string) string {
+	needle := "key~'"
+	start := strings.Index(filter, needle)
+	if start == -1 {
+		return ""
+	}
+	rest := filter[start+len(needle):]
+	end := strings.Index(rest, "%")
+	if end == -1 {
+		return strings.TrimSuffix(rest, "'")
+	}
+	return rest[:end]
 }
 
 func parseIntDefault(raw string, fallback int) int {

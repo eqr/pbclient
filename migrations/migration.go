@@ -7,6 +7,6 @@ import "github.com/eqr/pbclient"
 // and provide Up/Down hooks that perform the forward and rollback work.
 type Migration interface {
 	Name() string
-	Up(client *pbclient.Client) error
-	Down(client *pbclient.Client) error
+	Up(client pbclient.AuthenticatedClient) error
+	Down(client pbclient.AuthenticatedClient) error
 }

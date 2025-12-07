@@ -45,12 +45,23 @@ type pbField struct {
 	Code    string `json:"code"`
 }
 
+type pbError struct {
+	Message string
+	Fields  []string
+}
+
 // mapHTTPError maps an HTTP status and optional body to meaningful errors.
 // It returns sentinel errors when possible, wrapping them with parsed messages for context.
 func mapHTTPError(status int, body []byte) error {
-	msg := extractPBErrorMessage(body)
+	errInfo := parsePBError(body)
+	msg := errInfo.Message
 	if msg == "" && len(body) > 0 {
 		msg = strings.TrimSpace(string(body))
+	}
+	if msg == "" && len(errInfo.Fields) > 0 {
+		msg = strings.Join(errInfo.Fields, "; ")
+	} else if msg != "" && len(errInfo.Fields) > 0 {
+		msg = msg + ": " + strings.Join(errInfo.Fields, "; ")
 	}
 
 	switch status {
@@ -88,39 +99,35 @@ func wrapIfMessage(sentinel error, msg string) error {
 	return fmt.Errorf("%w: %s", sentinel, msg)
 }
 
-func extractPBErrorMessage(body []byte) string {
+func parsePBError(body []byte) pbError {
 	if len(body) == 0 {
-		return ""
+		return pbError{}
 	}
 
 	var pbErr pocketBaseError
 	if err := json.Unmarshal(body, &pbErr); err != nil {
-		return ""
+		return pbError{}
 	}
 
-	if m := strings.TrimSpace(pbErr.Message); m != "" {
-		return m
-	}
-
-	if len(pbErr.Data) == 0 {
-		return ""
-	}
-
-	fields := make([]string, 0, len(pbErr.Data))
-	for field := range pbErr.Data {
-		fields = append(fields, field)
-	}
-	sort.Strings(fields)
-
-	for _, field := range fields {
-		detail := pbErr.Data[field]
-		if msg := strings.TrimSpace(detail.Message); msg != "" {
-			return fmt.Sprintf("%s: %s", field, msg)
+	var fields []string
+	if len(pbErr.Data) > 0 {
+		fieldNames := make([]string, 0, len(pbErr.Data))
+		for field := range pbErr.Data {
+			fieldNames = append(fieldNames, field)
 		}
-		if detail.Code != "" {
-			return fmt.Sprintf("%s: %s", field, detail.Code)
+		sort.Strings(fieldNames)
+		for _, field := range fieldNames {
+			detail := pbErr.Data[field]
+			if msg := strings.TrimSpace(detail.Message); msg != "" {
+				fields = append(fields, fmt.Sprintf("%s: %s", field, msg))
+			} else if detail.Code != "" {
+				fields = append(fields, fmt.Sprintf("%s: %s", field, detail.Code))
+			}
 		}
 	}
 
-	return ""
+	return pbError{
+		Message: strings.TrimSpace(pbErr.Message),
+		Fields:  fields,
+	}
 }

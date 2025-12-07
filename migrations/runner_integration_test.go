@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"go/build"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -31,11 +33,11 @@ func TestRunnerIntegration_RunIdempotentAndAutoCreate(t *testing.T) {
 
 	callCounts := map[string]int{}
 	migrations := []Migration{
-		stubMigration{name: "202401_alpha", up: func(*pbclient.Client) error {
+		stubMigration{name: "202401_alpha", up: func(pbclient.AuthenticatedClient) error {
 			callCounts["202401_alpha"]++
 			return nil
 		}},
-		stubMigration{name: "202402_beta", up: func(*pbclient.Client) error {
+		stubMigration{name: "202402_beta", up: func(pbclient.AuthenticatedClient) error {
 			callCounts["202402_beta"]++
 			return nil
 		}},
@@ -87,7 +89,7 @@ func TestRunnerIntegration_RunStopsOnFailure(t *testing.T) {
 
 	migrations := []Migration{
 		stubMigration{name: "202401_ok"},
-		stubMigration{name: "202402_fail", up: func(*pbclient.Client) error { return errors.New("boom") }},
+		stubMigration{name: "202402_fail", up: func(pbclient.AuthenticatedClient) error { return errors.New("boom") }},
 		stubMigration{name: "202403_skip"},
 	}
 
@@ -121,9 +123,9 @@ func TestRunnerIntegration_DownRemovesLatest(t *testing.T) {
 
 	downCalls := make([]string, 0)
 	migrations := []Migration{
-		stubMigration{name: "202401_a", down: func(*pbclient.Client) error { downCalls = append(downCalls, "202401_a"); return nil }},
-		stubMigration{name: "202402_b", down: func(*pbclient.Client) error { downCalls = append(downCalls, "202402_b"); return nil }},
-		stubMigration{name: "202403_c", down: func(*pbclient.Client) error { downCalls = append(downCalls, "202403_c"); return nil }},
+		stubMigration{name: "202401_a", down: func(pbclient.AuthenticatedClient) error { downCalls = append(downCalls, "202401_a"); return nil }},
+		stubMigration{name: "202402_b", down: func(pbclient.AuthenticatedClient) error { downCalls = append(downCalls, "202402_b"); return nil }},
+		stubMigration{name: "202403_c", down: func(pbclient.AuthenticatedClient) error { downCalls = append(downCalls, "202403_c"); return nil }},
 	}
 
 	if err := runner.RegisterAll(migrations...); err != nil {
@@ -159,20 +161,13 @@ func TestRunnerIntegration_DownRemovesLatest(t *testing.T) {
 
 // --- integration helpers ---
 
-func newAuthedClient(t testing.TB, server *httptest.Server, app *tests.TestApp) *pbclient.Client {
+func newAuthedClient(t testing.TB, server *httptest.Server, app *tests.TestApp) pbclient.AuthenticatedClient {
 	token := newAuthToken(t, app, core.CollectionNameSuperusers, "test@example.com")
-	client, err := pbclient.NewClient(
-		server.URL,
-		"test@example.com",
-		"ignored",
-		pbclient.WithHTTPClient(server.Client()),
-		pbclient.WithAuthToken(token, time.Now().Add(time.Hour)),
-	)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+	return tokenClientAdapter{
+		baseURL: server.URL,
+		token:   token,
+		hc:      server.Client(),
 	}
-
-	return client
 }
 
 func newPocketBaseServer(t testing.TB) (*tests.TestApp, *httptest.Server) {
@@ -231,6 +226,26 @@ func pocketBaseDataDir(t testing.TB) string {
 	}
 	t.Skipf("PocketBase test data not found (looked in %v)", candidates)
 	return ""
+}
+
+type tokenClientAdapter struct {
+	baseURL string
+	token   string
+	hc      *http.Client
+}
+
+func (c tokenClientAdapter) Do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return c.hc.Do(req)
 }
 
 func pocketBaseVersion() string {

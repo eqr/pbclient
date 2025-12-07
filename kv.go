@@ -12,29 +12,32 @@ import (
 	"strings"
 )
 
-const defaultKVCollection = "kv_store"
+const defaultKVCollection = "kv"
 
 // KVStore offers simple key-value helpers backed by PocketBase.
 type KVStore struct {
-	client     *Client
+	client     AuthenticatedClient
 	collection string
+	appName    string
 }
 
 // NewKVStore creates a key-value store backed by the provided collection.
-// If collection is empty, a default "kv_store" collection is used.
-func NewKVStore(client *Client, collection string) *KVStore {
+// If collection is empty, a default "kv" collection is used.
+// appName scopes keys when the backing collection includes an "appname" field.
+func NewKVStore(client AuthenticatedClient, collection string, appName string) KVStore {
 	collection = strings.TrimSpace(collection)
 	if collection == "" {
 		collection = defaultKVCollection
 	}
-	return &KVStore{
+	return KVStore{
 		client:     client,
 		collection: collection,
+		appName:    strings.TrimSpace(appName),
 	}
 }
 
 // Set inserts or overwrites a value for the given key.
-func (s *KVStore) Set(ctx context.Context, key string, value interface{}) error {
+func (s KVStore) Set(ctx context.Context, key string, value interface{}) error {
 	if s.client == nil {
 		return errors.New("kv client is nil")
 	}
@@ -54,9 +57,11 @@ func (s *KVStore) Set(ctx context.Context, key string, value interface{}) error 
 		return err
 	}
 
-	payload := map[string]string{
-		"key":   key,
-		"value": string(valueBytes),
+	// Use interface{} for value to support both text and JSON field types
+	payload := map[string]interface{}{
+		"key":     key,
+		"value":   json.RawMessage(valueBytes),
+		"appname": s.appName,
 	}
 
 	body, err := json.Marshal(payload)
@@ -71,7 +76,7 @@ func (s *KVStore) Set(ctx context.Context, key string, value interface{}) error 
 		path += "/" + url.PathEscape(id)
 	}
 
-	resp, err := s.client.doRequest(ctx, method, path, bytes.NewReader(body))
+	resp, err := s.client.Do(ctx, method, path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -80,54 +85,118 @@ func (s *KVStore) Set(ctx context.Context, key string, value interface{}) error 
 	return decodeJSONResponse(resp, nil)
 }
 
-// Get fetches a value for the given key into dest.
-func (s *KVStore) Get(ctx context.Context, key string, dest interface{}) error {
+// Get fetches a value for the given key as raw JSON bytes.
+// For collections using a text field, the returned bytes contain the decoded JSON string.
+func (s KVStore) Get(ctx context.Context, key string) (json.RawMessage, error) {
 	if s.client == nil {
-		return errors.New("kv client is nil")
+		return nil, errors.New("kv client is nil")
 	}
 
 	key = strings.TrimSpace(key)
 	if key == "" {
-		return errors.New("key is required")
+		return nil, errors.New("key is required")
 	}
 
 	params := url.Values{}
-	params.Set("filter", Eq("key", key))
+	params.Set("filter", s.filterByKey(key))
 	params.Set("perPage", "1")
 
 	path := fmt.Sprintf("/api/collections/%s/records?%s", url.PathEscape(s.collection), params.Encode())
-	resp, err := s.client.doRequest(ctx, http.MethodGet, path, nil)
+	resp, err := s.client.Do(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var payload struct {
 		Items []struct {
-			Value string `json:"value"`
+			Value json.RawMessage `json:"value"`
 		} `json:"items"`
 	}
 
 	if err := decodeJSONResponse(resp, &payload); err != nil {
-		return err
+		return nil, err
 	}
 
 	if len(payload.Items) == 0 {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 
+	// Try to unmarshal as direct JSON first (for JSON field type)
+	var raw json.RawMessage
+	if err := json.Unmarshal(payload.Items[0].Value, &raw); err == nil {
+		return raw, nil
+	}
+
+	// Fall back to treating it as a JSON-encoded string (for text field type)
+	var str string
+	if err := json.Unmarshal(payload.Items[0].Value, &str); err != nil {
+		return nil, fmt.Errorf("decode value: %w", err)
+	}
+	return json.RawMessage(str), nil
+}
+
+// GetInto fetches a value for the given key and unmarshals it into dest.
+func (s KVStore) GetInto(ctx context.Context, key string, dest interface{}) error {
 	if dest == nil {
 		return fmt.Errorf("dest must be non-nil")
 	}
 
-	if err := json.Unmarshal([]byte(payload.Items[0].Value), dest); err != nil {
+	data, err := s.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+
+	if err := json.Unmarshal(data, dest); err != nil {
 		return fmt.Errorf("decode value: %w", err)
 	}
+
 	return nil
 }
 
+// TypedKVStore provides typed helpers built on top of KVStore.
+type TypedKVStore[T any] struct {
+	store KVStore
+}
+
+// NewTypedKVStore creates a typed KV store bound to a PocketBase collection.
+func NewTypedKVStore[T any](client AuthenticatedClient, collection string, appName string) TypedKVStore[T] {
+	return TypedKVStore[T]{store: NewKVStore(client, collection, appName)}
+}
+
+// Set inserts or overwrites a value for the given key.
+func (s TypedKVStore[T]) Set(ctx context.Context, key string, value T) error {
+	return s.store.Set(ctx, key, value)
+}
+
+// Get fetches a value for the given key.
+func (s TypedKVStore[T]) Get(ctx context.Context, key string) (T, error) {
+	var zero T
+
+	var out T
+	if err := s.store.GetInto(ctx, key, &out); err != nil {
+		return zero, err
+	}
+	return out, nil
+}
+
 // Delete removes a key. It is idempotent and returns nil if the key does not exist.
-func (s *KVStore) Delete(ctx context.Context, key string) error {
+func (s TypedKVStore[T]) Delete(ctx context.Context, key string) error {
+	return s.store.Delete(ctx, key)
+}
+
+// Exists returns true if a key exists.
+func (s TypedKVStore[T]) Exists(ctx context.Context, key string) (bool, error) {
+	return s.store.Exists(ctx, key)
+}
+
+// List returns all keys, optionally filtered by prefix.
+func (s TypedKVStore[T]) List(ctx context.Context, prefix string) ([]string, error) {
+	return s.store.List(ctx, prefix)
+}
+
+// Delete removes a key. It is idempotent and returns nil if the key does not exist.
+func (s KVStore) Delete(ctx context.Context, key string) error {
 	if s.client == nil {
 		return errors.New("kv client is nil")
 	}
@@ -146,7 +215,7 @@ func (s *KVStore) Delete(ctx context.Context, key string) error {
 	}
 
 	path := fmt.Sprintf("/api/collections/%s/records/%s", url.PathEscape(s.collection), url.PathEscape(id))
-	resp, err := s.client.doRequest(ctx, http.MethodDelete, path, nil)
+	resp, err := s.client.Do(ctx, http.MethodDelete, path, nil)
 	if err != nil {
 		return err
 	}
@@ -160,7 +229,7 @@ func (s *KVStore) Delete(ctx context.Context, key string) error {
 }
 
 // Exists returns true if a key exists.
-func (s *KVStore) Exists(ctx context.Context, key string) (bool, error) {
+func (s KVStore) Exists(ctx context.Context, key string) (bool, error) {
 	id, err := s.getRecordIDByKey(ctx, key)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -172,7 +241,7 @@ func (s *KVStore) Exists(ctx context.Context, key string) (bool, error) {
 }
 
 // List returns all keys, optionally filtered by prefix.
-func (s *KVStore) List(ctx context.Context, prefix string) ([]string, error) {
+func (s KVStore) List(ctx context.Context, prefix string) ([]string, error) {
 	if s.client == nil {
 		return nil, errors.New("kv client is nil")
 	}
@@ -186,12 +255,17 @@ func (s *KVStore) List(ctx context.Context, prefix string) ([]string, error) {
 		params.Set("page", strconv.Itoa(page))
 		params.Set("perPage", "200")
 		params.Set("fields", "id,key")
+		filter := s.appNameFilter()
 		if prefix != "" {
-			params.Set("filter", fmt.Sprintf("key~'%s%%'", escapeFilterValue(prefix)))
+			prefixFilter := fmt.Sprintf("key~'%s%%'", escapeFilterValue(prefix))
+			filter = And(filter, prefixFilter)
+		}
+		if filter != "" {
+			params.Set("filter", filter)
 		}
 
 		path := fmt.Sprintf("/api/collections/%s/records?%s", url.PathEscape(s.collection), params.Encode())
-		resp, err := s.client.doRequest(ctx, http.MethodGet, path, nil)
+		resp, err := s.client.Do(ctx, http.MethodGet, path, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -223,7 +297,7 @@ func (s *KVStore) List(ctx context.Context, prefix string) ([]string, error) {
 }
 
 // getRecordIDByKey returns the record ID for a key or ErrNotFound.
-func (s *KVStore) getRecordIDByKey(ctx context.Context, key string) (string, error) {
+func (s KVStore) getRecordIDByKey(ctx context.Context, key string) (string, error) {
 	if s.client == nil {
 		return "", errors.New("kv client is nil")
 	}
@@ -234,12 +308,12 @@ func (s *KVStore) getRecordIDByKey(ctx context.Context, key string) (string, err
 	}
 
 	params := url.Values{}
-	params.Set("filter", Eq("key", key))
+	params.Set("filter", s.filterByKey(key))
 	params.Set("perPage", "1")
 	params.Set("fields", "id")
 
 	path := fmt.Sprintf("/api/collections/%s/records?%s", url.PathEscape(s.collection), params.Encode())
-	resp, err := s.client.doRequest(ctx, http.MethodGet, path, nil)
+	resp, err := s.client.Do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return "", err
 	}
@@ -260,4 +334,15 @@ func (s *KVStore) getRecordIDByKey(ctx context.Context, key string) (string, err
 	}
 
 	return payload.Items[0].ID, nil
+}
+
+func (s KVStore) appNameFilter() string {
+	if s.appName == "" {
+		return ""
+	}
+	return Eq("appname", s.appName)
+}
+
+func (s KVStore) filterByKey(key string) string {
+	return And(Eq("key", key), s.appNameFilter())
 }

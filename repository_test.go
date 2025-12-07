@@ -16,18 +16,19 @@ type testRecord struct {
 	Name string `json:"name"`
 }
 
-func newTestClient(t *testing.T, server *httptest.Server) *Client {
+func newTestClient(t *testing.T, server *httptest.Server) AuthenticatedClient {
 	t.Helper()
-	client, err := NewClient(server.URL, "admin@example.com", "secret")
+	raw, err := NewClient(server.URL, WithHTTPClient(server.Client()))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
 
-	client.tokenMutex.Lock()
-	client.token = "test-token"
-	client.tokenExpires = time.Now().Add(time.Hour)
-	client.tokenMutex.Unlock()
-	return client
+	c := raw.(*client)
+	return &authenticatedClient{
+		client:       c,
+		token:        "test-token",
+		tokenExpires: time.Now().Add(time.Hour),
+	}
 }
 
 func TestRepositoryGet(t *testing.T) {

@@ -21,13 +21,18 @@ func TestClientRetries429(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client, err := NewClient(ts.URL, "admin@example.com", "password", WithHTTPClient(ts.Client()), WithRetry(2, 10*time.Millisecond))
+	rawClient, err := NewClient(ts.URL, WithHTTPClient(ts.Client()), WithRetry(2, 10*time.Millisecond))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	client.token = "token"
+	c := rawClient.(*client)
+	client := &authenticatedClient{
+		client:       c,
+		token:        "token",
+		tokenExpires: time.Now().Add(time.Hour),
+	}
 
-	resp, err := client.doRequest(context.Background(), http.MethodGet, "/test", nil)
+	resp, err := client.Do(context.Background(), http.MethodGet, "/test", nil)
 	if err != nil {
 		t.Fatalf("doRequest: %v", err)
 	}
@@ -53,13 +58,18 @@ func TestClientRetriesNetworkErrors(t *testing.T) {
 	}
 
 	httpClient := &http.Client{Transport: flaky}
-	client, err := NewClient(ts.URL, "admin@example.com", "password", WithHTTPClient(httpClient), WithRetry(2, 5*time.Millisecond))
+	rawClient, err := NewClient(ts.URL, WithHTTPClient(httpClient), WithRetry(2, 5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	client.token = "token"
+	c := rawClient.(*client)
+	client := &authenticatedClient{
+		client:       c,
+		token:        "token",
+		tokenExpires: time.Now().Add(time.Hour),
+	}
 
-	resp, err := client.doRequest(context.Background(), http.MethodGet, "/test", nil)
+	resp, err := client.Do(context.Background(), http.MethodGet, "/test", nil)
 	if err != nil {
 		t.Fatalf("doRequest: %v", err)
 	}
@@ -93,30 +103,36 @@ func TestAuthenticateSuccessAndFailure(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client, err := NewClient(ts.URL, "admin@example.com", "password", WithHTTPClient(ts.Client()))
+	rawClient, err := NewClient(ts.URL, WithHTTPClient(ts.Client()))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+	c := rawClient.(*client)
+	ac := &authenticatedClient{
+		client:       c,
+		creds:        Credentials{Email: "admin@example.com", Password: "password"},
+		authEndpoint: userAuthEndpoint,
+	}
 
 	// success
-	if err := client.authenticate(); err != nil {
+	if err := ac.reauthenticate(); err != nil {
 		t.Fatalf("authenticate success: %v", err)
 	}
-	if client.readToken() != "tok1" {
-		t.Fatalf("expected token tok1, got %q", client.readToken())
+	if ac.readToken() != "tok1" {
+		t.Fatalf("expected token tok1, got %q", ac.readToken())
 	}
-	if client.tokenExpires.IsZero() {
+	if ac.tokenExpires.IsZero() {
 		t.Fatalf("expected token expiry set")
 	}
 
 	// failure clears token
-	if err := client.authenticate(); !errors.Is(err, ErrUnauthorized) {
+	if err := ac.reauthenticate(); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("expected ErrUnauthorized, got %v", err)
 	}
-	if client.readToken() != "" {
+	if ac.readToken() != "" {
 		t.Fatalf("token should be cleared after failure")
 	}
-	if !client.tokenExpires.IsZero() {
+	if !ac.tokenExpires.IsZero() {
 		t.Fatalf("token expiry should be cleared after failure")
 	}
 }
@@ -129,13 +145,18 @@ func TestEnsureAuthenticatedRefreshOnExpiry(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client, err := NewClient(ts.URL, "admin@example.com", "password", WithHTTPClient(ts.Client()))
+	rawClient, err := NewClient(ts.URL, WithHTTPClient(ts.Client()))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-
-	client.token = "stale"
-	client.tokenExpires = time.Now().Add(-time.Minute)
+	c := rawClient.(*client)
+	client := &authenticatedClient{
+		client:       c,
+		creds:        Credentials{Email: "admin@example.com", Password: "password"},
+		authEndpoint: userAuthEndpoint,
+		token:        "stale",
+		tokenExpires: time.Now().Add(-time.Minute),
+	}
 
 	if err := client.ensureAuthenticated(); err != nil {
 		t.Fatalf("ensureAuthenticated: %v", err)
@@ -158,12 +179,20 @@ func TestDoRequestClearsTokenOnUnauthorized(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client, err := NewClient(ts.URL, "admin@example.com", "password", WithHTTPClient(ts.Client()))
+	rawClient, err := NewClient(ts.URL, WithHTTPClient(ts.Client()))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+	c := rawClient.(*client)
+	client := &authenticatedClient{
+		client:       c,
+		creds:        Credentials{Email: "admin@example.com", Password: "password"},
+		authEndpoint: userAuthEndpoint,
+		token:        "token",
+		tokenExpires: time.Now().Add(time.Hour),
+	}
 
-	resp, err := client.doRequest(context.Background(), http.MethodGet, "/anything", nil)
+	resp, err := client.Do(context.Background(), http.MethodGet, "/anything", nil)
 	if err != nil {
 		t.Fatalf("doRequest: %v", err)
 	}
@@ -200,13 +229,16 @@ func TestEnsureAuthenticatedSingleFlight(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client, err := NewClient(ts.URL, "admin@example.com", "password", WithHTTPClient(ts.Client()))
+	rawClient, err := NewClient(ts.URL, WithHTTPClient(ts.Client()))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-
-	client.token = ""
-	client.tokenExpires = time.Now().Add(-time.Hour)
+	client := &authenticatedClient{
+		client:       rawClient.(*client),
+		creds:        Credentials{Email: "admin@example.com", Password: "password"},
+		authEndpoint: userAuthEndpoint,
+		tokenExpires: time.Now().Add(-time.Hour),
+	}
 
 	start := make(chan struct{})
 	done := make(chan struct{}, 2)

@@ -15,12 +15,12 @@ import (
 
 // Repository exposes CRUD helpers for PocketBase collections.
 type Repository[T any] struct {
-	client     *Client
+	client     AuthenticatedClient
 	collection string
 }
 
 // NewRepository creates a repository bound to a PocketBase collection.
-func NewRepository[T any](client *Client, collection string) *Repository[T] {
+func NewRepository[T any](client AuthenticatedClient, collection string) *Repository[T] {
 	return &Repository[T]{
 		client:     client,
 		collection: strings.TrimSpace(collection),
@@ -58,7 +58,7 @@ func (r *Repository[T]) Get(ctx context.Context, id string) (*T, error) {
 	}
 
 	path := fmt.Sprintf("/api/collections/%s/records/%s", url.PathEscape(r.collection), url.PathEscape(id))
-	resp, err := r.client.doRequest(ctx, http.MethodGet, path, nil)
+	resp, err := r.client.Do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +102,7 @@ func (r *Repository[T]) List(ctx context.Context, opts ListOptions) (*ListResult
 		path += "?" + encoded
 	}
 
-	resp, err := r.client.doRequest(ctx, http.MethodGet, path, nil)
+	resp, err := r.client.Do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +149,7 @@ func (r *Repository[T]) Create(ctx context.Context, record T) (*T, error) {
 	}
 
 	path := fmt.Sprintf("/api/collections/%s/records", url.PathEscape(r.collection))
-	resp, err := r.client.doRequest(ctx, http.MethodPost, path, bytes.NewReader(payload))
+	resp, err := r.client.Do(ctx, http.MethodPost, path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +180,7 @@ func (r *Repository[T]) Update(ctx context.Context, id string, record T) (*T, er
 	}
 
 	path := fmt.Sprintf("/api/collections/%s/records/%s", url.PathEscape(r.collection), url.PathEscape(id))
-	resp, err := r.client.doRequest(ctx, http.MethodPatch, path, bytes.NewReader(payload))
+	resp, err := r.client.Do(ctx, http.MethodPatch, path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +206,7 @@ func (r *Repository[T]) Delete(ctx context.Context, id string) error {
 	}
 
 	path := fmt.Sprintf("/api/collections/%s/records/%s", url.PathEscape(r.collection), url.PathEscape(id))
-	resp, err := r.client.doRequest(ctx, http.MethodDelete, path, nil)
+	resp, err := r.client.Do(ctx, http.MethodDelete, path, nil)
 	if err != nil {
 		return err
 	}

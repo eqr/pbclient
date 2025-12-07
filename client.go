@@ -15,59 +15,45 @@ import (
 	"log/slog"
 )
 
-// Client provides authenticated HTTP access to PocketBase.
-// It is safe for concurrent use.
-type Client struct {
-	baseURL       string
-	token         string
-	tokenExpires  time.Time
-	adminEmail    string
-	adminPassword string
-	httpClient    *http.Client
-	maxRetries    int
-	backoff       time.Duration
-	authMutex     sync.Mutex
-	tokenMutex    sync.RWMutex
-	logger        *slog.Logger
+// Credentials holds authentication credentials.
+type Credentials struct {
+	Email    string
+	Password string
+}
+
+// Client provides unauthenticated access to PocketBase and can create authenticated clients.
+type Client interface {
+	AuthenticateUser(creds Credentials) (AuthenticatedClient, error)
+	AuthenticateSuperuser(creds Credentials) (AuthenticatedClient, error)
+}
+
+// AuthenticatedClient provides authenticated HTTP access to PocketBase.
+type AuthenticatedClient interface {
+	Do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error)
 }
 
 // ClientOption configures optional Client settings.
-type ClientOption func(*Client)
+type ClientOption func(*client)
 
 // WithHTTPClient overrides the default http.Client.
-func WithHTTPClient(client *http.Client) ClientOption {
-	return func(c *Client) {
-		if client != nil {
-			c.httpClient = client
+func WithHTTPClient(hc *http.Client) ClientOption {
+	return func(c *client) {
+		if hc != nil {
+			c.httpClient = hc
 		}
 	}
 }
 
 // WithLogger attaches a logger used for debug information.
 func WithLogger(logger *slog.Logger) ClientOption {
-	return func(c *Client) {
+	return func(c *client) {
 		c.logger = logger
-	}
-}
-
-// WithAuthToken seeds the client with an existing authentication token and optional expiry.
-// If token is empty, this option does nothing.
-func WithAuthToken(token string, expires time.Time) ClientOption {
-	trimmed := strings.TrimSpace(token)
-	return func(c *Client) {
-		if trimmed == "" {
-			return
-		}
-		c.tokenMutex.Lock()
-		defer c.tokenMutex.Unlock()
-		c.token = trimmed
-		c.tokenExpires = expires
 	}
 }
 
 // WithTimeout sets the HTTP client timeout.
 func WithTimeout(timeout time.Duration) ClientOption {
-	return func(c *Client) {
+	return func(c *client) {
 		if c.httpClient == nil {
 			c.httpClient = defaultHTTPClient()
 		}
@@ -76,9 +62,8 @@ func WithTimeout(timeout time.Duration) ClientOption {
 }
 
 // WithRetry sets the maximum number of retries for transient errors and the base backoff.
-// Retries apply to network errors and HTTP 429 responses.
 func WithRetry(maxRetries int, backoff time.Duration) ClientOption {
-	return func(c *Client) {
+	return func(c *client) {
 		if maxRetries < 0 {
 			maxRetries = 0
 		}
@@ -89,46 +74,216 @@ func WithRetry(maxRetries int, backoff time.Duration) ClientOption {
 	}
 }
 
-// NewClient constructs a PocketBase client without performing authentication.
-// Use ClientOptions to set timeouts, retries, logging, or custom transports.
-func NewClient(baseURL, adminEmail, adminPassword string, opts ...ClientOption) (*Client, error) {
-	baseURL = strings.TrimSpace(baseURL)
-	adminEmail = strings.TrimSpace(adminEmail)
+// client is the implementation of Client.
+type client struct {
+	baseURL    string
+	httpClient *http.Client
+	maxRetries int
+	backoff    time.Duration
+	logger     *slog.Logger
+}
 
+// NewClient constructs a PocketBase client.
+func NewClient(baseURL string, opts ...ClientOption) (Client, error) {
+	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		return nil, errors.New("baseURL is required")
 	}
-	if adminEmail == "" {
-		return nil, errors.New("admin email is required")
-	}
-	if adminPassword == "" {
-		return nil, errors.New("admin password is required")
-	}
 
-	client := &Client{
-		baseURL:       strings.TrimRight(baseURL, "/"),
-		adminEmail:    adminEmail,
-		adminPassword: adminPassword,
-		httpClient:    defaultHTTPClient(),
+	c := &client{
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		httpClient: defaultHTTPClient(),
 	}
 
 	for _, opt := range opts {
 		if opt != nil {
-			opt(client)
+			opt(c)
 		}
 	}
-	if client.httpClient == nil {
-		client.httpClient = defaultHTTPClient()
+	if c.httpClient == nil {
+		c.httpClient = defaultHTTPClient()
 	}
 
-	return client, nil
+	return c, nil
 }
 
-// authenticate logs in and stores the access token.
-func (c *Client) authenticate() error {
+const (
+	userAuthEndpoint      = "/api/collections/users/auth-with-password"
+	superuserAuthEndpoint = "/api/collections/_superusers/auth-with-password"
+)
+
+// AuthenticateUser authenticates using the users collection endpoint.
+func (c *client) AuthenticateUser(creds Credentials) (AuthenticatedClient, error) {
+	return c.authenticate(creds, userAuthEndpoint)
+}
+
+// AuthenticateSuperuser authenticates using the superuser endpoint.
+func (c *client) AuthenticateSuperuser(creds Credentials) (AuthenticatedClient, error) {
+	return c.authenticate(creds, superuserAuthEndpoint)
+}
+
+func (c *client) authenticate(creds Credentials, endpoint string) (AuthenticatedClient, error) {
+	if strings.TrimSpace(creds.Email) == "" {
+		return nil, errors.New("email is required")
+	}
+	if creds.Password == "" {
+		return nil, errors.New("password is required")
+	}
+
 	payload := map[string]string{
-		"identity": c.adminEmail,
-		"password": c.adminPassword,
+		"identity": creds.Email,
+		"password": creds.Password,
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		return nil, fmt.Errorf("encode auth payload: %w", err)
+	}
+
+	url := c.baseURL + endpoint
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, &buf)
+	if err != nil {
+		return nil, fmt.Errorf("build auth request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("authentication request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read auth response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, mapHTTPError(resp.StatusCode, body)
+	}
+
+	var authResp struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &authResp); err != nil {
+		return nil, fmt.Errorf("parse auth response: %w", err)
+	}
+	if authResp.Token == "" {
+		return nil, errors.New("authentication succeeded but token missing")
+	}
+
+	expiry := time.Now().Add(23 * time.Hour)
+	if c.logger != nil {
+		c.logger.Info("authenticated with PocketBase", "expires", expiry)
+	}
+
+	return &authenticatedClient{
+		client:       c,
+		token:        authResp.Token,
+		tokenExpires: expiry,
+		creds:        creds,
+		authEndpoint: endpoint,
+	}, nil
+}
+
+// authenticatedClient is the implementation of AuthenticatedClient.
+type authenticatedClient struct {
+	client       *client
+	token        string
+	tokenExpires time.Time
+	creds        Credentials
+	authEndpoint string
+	authMutex    sync.Mutex
+	tokenMutex   sync.RWMutex
+}
+
+// Do executes an authenticated HTTP request with retries.
+func (ac *authenticatedClient) Do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var bodyBytes []byte
+	if body != nil {
+		data, err := io.ReadAll(body)
+		if err != nil {
+			return nil, fmt.Errorf("read request body: %w", err)
+		}
+		bodyBytes = data
+	}
+
+	url := ac.client.baseURL + "/" + strings.TrimLeft(path, "/")
+	attempts := ac.client.maxRetries
+
+	for attempt := 0; attempt <= attempts; attempt++ {
+		if err := ac.ensureAuthenticated(); err != nil {
+			return nil, err
+		}
+
+		token := ac.readToken()
+		var reqBody io.Reader
+		if bodyBytes != nil {
+			reqBody = bytes.NewReader(bodyBytes)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		if bodyBytes != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, err := ac.client.httpClient.Do(req)
+		if err != nil {
+			if attempt == attempts {
+				return nil, err
+			}
+			if waitErr := ac.wait(ctx, attempt); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			ac.clearToken()
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests && attempt < attempts {
+			resp.Body.Close()
+			if waitErr := ac.wait(ctx, attempt); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
+		}
+
+		return resp, nil
+	}
+
+	return nil, errors.New("request failed after retries")
+}
+
+func (ac *authenticatedClient) ensureAuthenticated() error {
+	if ac.tokenValid() {
+		return nil
+	}
+	ac.authMutex.Lock()
+	defer ac.authMutex.Unlock()
+
+	if ac.tokenValid() {
+		return nil
+	}
+	return ac.reauthenticate()
+}
+
+func (ac *authenticatedClient) reauthenticate() error {
+	payload := map[string]string{
+		"identity": ac.creds.Email,
+		"password": ac.creds.Password,
 	}
 
 	var buf bytes.Buffer
@@ -136,14 +291,14 @@ func (c *Client) authenticate() error {
 		return fmt.Errorf("encode auth payload: %w", err)
 	}
 
-	url := c.baseURL + "/api/collections/users/auth-with-password"
+	url := ac.client.baseURL + ac.authEndpoint
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, &buf)
 	if err != nil {
 		return fmt.Errorf("build auth request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := ac.client.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("authentication request failed: %w", err)
 	}
@@ -155,7 +310,7 @@ func (c *Client) authenticate() error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		c.clearToken()
+		ac.clearToken()
 		return mapHTTPError(resp.StatusCode, body)
 	}
 
@@ -170,110 +325,19 @@ func (c *Client) authenticate() error {
 	}
 
 	expiry := time.Now().Add(23 * time.Hour)
-	c.tokenMutex.Lock()
-	c.token = authResp.Token
-	c.tokenExpires = expiry
-	c.tokenMutex.Unlock()
+	ac.tokenMutex.Lock()
+	ac.token = authResp.Token
+	ac.tokenExpires = expiry
+	ac.tokenMutex.Unlock()
 
-	if c.logger != nil {
-		c.logger.Info("authenticated with PocketBase", "expires", expiry)
+	if ac.client.logger != nil {
+		ac.client.logger.Info("re-authenticated with PocketBase", "expires", expiry)
 	}
 	return nil
 }
 
-// ensureAuthenticated lazily obtains or refreshes a token when needed.
-func (c *Client) ensureAuthenticated() error {
-	if c.tokenValid() {
-		return nil
-	}
-	c.authMutex.Lock()
-	defer c.authMutex.Unlock()
-
-	if c.tokenValid() {
-		return nil
-	}
-	return c.authenticate()
-}
-
-// doRequest executes an authenticated HTTP request to PocketBase with optional retries.
-// It handles token refresh, 401/403 clearing, and exponential backoff on 429/network failures.
-func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	var bodyBytes []byte
-	if body != nil {
-		data, err := io.ReadAll(body)
-		if err != nil {
-			return nil, fmt.Errorf("read request body: %w", err)
-		}
-		bodyBytes = data
-	}
-
-	baseURL := c.baseURL + "/" + strings.TrimLeft(path, "/")
-	attempts := c.maxRetries
-
-	for attempt := 0; attempt <= attempts; attempt++ {
-		if err := c.ensureAuthenticated(); err != nil {
-			return nil, err
-		}
-
-		token := c.readToken()
-		var reqBody io.Reader
-		if bodyBytes != nil {
-			reqBody = bytes.NewReader(bodyBytes)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, method, baseURL, reqBody)
-		if err != nil {
-			return nil, fmt.Errorf("build request: %w", err)
-		}
-
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-		if bodyBytes != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			if attempt == attempts {
-				return nil, err
-			}
-			if waitErr := c.wait(ctx, attempt); waitErr != nil {
-				return nil, waitErr
-			}
-			continue
-		}
-
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			c.clearToken()
-		}
-
-		if resp.StatusCode == http.StatusTooManyRequests && attempt < attempts {
-			resp.Body.Close()
-			if waitErr := c.wait(ctx, attempt); waitErr != nil {
-				return nil, waitErr
-			}
-			continue
-		}
-
-		return resp, nil
-	}
-
-	return nil, errors.New("request failed after retries")
-}
-
-// Do executes an authenticated HTTP request with retries.
-// Callers must close the returned response body.
-func (c *Client) Do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
-	return c.doRequest(ctx, method, path, body)
-}
-
-func (c *Client) wait(ctx context.Context, attempt int) error {
-	backoff := c.backoff
+func (ac *authenticatedClient) wait(ctx context.Context, attempt int) error {
+	backoff := ac.client.backoff
 	if backoff <= 0 {
 		backoff = 200 * time.Millisecond
 	}
@@ -290,30 +354,30 @@ func (c *Client) wait(ctx context.Context, attempt int) error {
 	}
 }
 
-func (c *Client) tokenValid() bool {
-	c.tokenMutex.RLock()
-	defer c.tokenMutex.RUnlock()
+func (ac *authenticatedClient) tokenValid() bool {
+	ac.tokenMutex.RLock()
+	defer ac.tokenMutex.RUnlock()
 
-	if c.token == "" {
+	if ac.token == "" {
 		return false
 	}
-	if c.tokenExpires.IsZero() {
+	if ac.tokenExpires.IsZero() {
 		return true
 	}
-	return time.Now().Before(c.tokenExpires)
+	return time.Now().Before(ac.tokenExpires)
 }
 
-func (c *Client) readToken() string {
-	c.tokenMutex.RLock()
-	defer c.tokenMutex.RUnlock()
-	return c.token
+func (ac *authenticatedClient) readToken() string {
+	ac.tokenMutex.RLock()
+	defer ac.tokenMutex.RUnlock()
+	return ac.token
 }
 
-func (c *Client) clearToken() {
-	c.tokenMutex.Lock()
-	defer c.tokenMutex.Unlock()
-	c.token = ""
-	c.tokenExpires = time.Time{}
+func (ac *authenticatedClient) clearToken() {
+	ac.tokenMutex.Lock()
+	defer ac.tokenMutex.Unlock()
+	ac.token = ""
+	ac.tokenExpires = time.Time{}
 }
 
 func defaultHTTPClient() *http.Client {

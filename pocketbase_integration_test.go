@@ -28,12 +28,15 @@ func TestRepositoryAgainstPocketBase(t *testing.T) {
 
 	token := newAuthToken(t, app, core.CollectionNameSuperusers, "test@example.com")
 
-	client, err := NewClient(server.URL, "test@example.com", "ignored", WithHTTPClient(server.Client()))
+	raw, err := NewClient(server.URL, WithHTTPClient(server.Client()))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	client.token = token
-	client.tokenExpires = time.Now().Add(time.Hour)
+	client := &authenticatedClient{
+		client:       raw.(*client),
+		token:        token,
+		tokenExpires: time.Now().Add(time.Hour),
+	}
 
 	repo := NewRepository[map[string]any](client, "demo2")
 

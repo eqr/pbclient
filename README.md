@@ -27,16 +27,20 @@ type Todo struct {
 }
 
 func main() {
-	client, err := pbclient.NewClient(
-		"https://your-pocketbase-host",
-		"admin@example.com",
-		"super-secret",
-	)
+	client, err := pbclient.NewClient("https://your-pocketbase-host")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	repo := pbclient.NewRepository[Todo](client, "todos")
+	authed, err := client.AuthenticateSuperuser(pbclient.Credentials{
+		Email:    "admin@example.com",
+		Password: "super-secret",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	repo := pbclient.NewRepository[Todo](authed, "todos")
 
 	ctx := context.Background()
 
@@ -59,12 +63,13 @@ func main() {
 - `WithTimeout(time.Duration)`: set HTTP timeout.
 - `WithRetry(maxRetries, backoff)`: retry 429/network errors with exponential backoff.
 - `WithLogger(*slog.Logger)`: structured logging for auth and retries.
-- `WithAuthToken(token, expires)`: seed an existing auth token instead of logging in.
 
 ## Repository Usage
 
 ```go
-repo := pbclient.NewRepository[Todo](client, "todos")
+client, _ := pbclient.NewClient("https://your-pocketbase-host")
+authed, _ := client.AuthenticateSuperuser(pbclient.Credentials{Email: "admin@example.com", Password: "super-secret"})
+repo := pbclient.NewRepository[Todo](authed, "todos")
 
 // List with filters, sorting, and field selection
 todos, err := repo.List(ctx, pbclient.ListOptions{
@@ -82,12 +87,11 @@ updated, err := repo.Update(ctx, created.ID, Todo{Title: "updated title", Done: 
 ## KV Store Usage
 
 ```go
-kv := pbclient.NewKVStore(client, "kv_store") // collection defaults to "kv_store"
+kv := pbclient.NewTypedKVStore[map[string]any](authed, "kv_store", "myapp") // collection defaults to "kv_store"
 
 _ = kv.Set(ctx, "feature_flag", map[string]any{"name": "beta", "enabled": true})
 
-var flag map[string]any
-_ = kv.Get(ctx, "feature_flag", &flag)
+flag, _ := kv.Get(ctx, "feature_flag")
 
 exists, _ := kv.Exists(ctx, "feature_flag")
 keys, _ := kv.List(ctx, "feature_")

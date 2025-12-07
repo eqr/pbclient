@@ -18,16 +18,20 @@ type Todo struct {
 }
 
 func main() {
-	client, err := pbclient.NewClient(
-		"https://your-pocketbase-host",
-		"admin@example.com",
-		"super-secret",
-	)
+	client, err := pbclient.NewClient("https://your-pocketbase-host")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	repo := pbclient.NewRepository[Todo](client, "todos")
+	authed, err := client.AuthenticateSuperuser(pbclient.Credentials{
+		Email:    "admin@example.com",
+		Password: "super-secret",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	repo := pbclient.NewRepository[Todo](authed, "todos")
 	ctx := context.Background()
 
 	created, err := repo.Create(ctx, Todo{Title: "write docs", Done: false})

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -27,18 +28,9 @@ func TestRunExecutesInNameOrder(t *testing.T) {
 
 	calls := make([]string, 0)
 	migrations := []Migration{
-		stubMigration{name: "202503_add_c", up: func(*pbclient.Client) error {
-			calls = append(calls, "202503_add_c")
-			return nil
-		}},
-		stubMigration{name: "202401_add_a", up: func(*pbclient.Client) error {
-			calls = append(calls, "202401_add_a")
-			return nil
-		}},
-		stubMigration{name: "202502_add_b", up: func(*pbclient.Client) error {
-			calls = append(calls, "202502_add_b")
-			return nil
-		}},
+		stubMigration{name: "202503_add_c", up: func(pbclient.AuthenticatedClient) error { calls = append(calls, "202503_add_c"); return nil }},
+		stubMigration{name: "202401_add_a", up: func(pbclient.AuthenticatedClient) error { calls = append(calls, "202401_add_a"); return nil }},
+		stubMigration{name: "202502_add_b", up: func(pbclient.AuthenticatedClient) error { calls = append(calls, "202502_add_b"); return nil }},
 	}
 
 	if err := runner.RegisterAll(migrations...); err != nil {
@@ -132,9 +124,9 @@ func TestDownRollsBackLatestMigrations(t *testing.T) {
 
 	downCalls := make([]string, 0)
 	migrations := []Migration{
-		stubMigration{name: "202401_add_a", down: func(*pbclient.Client) error { downCalls = append(downCalls, "202401_add_a"); return nil }},
-		stubMigration{name: "202502_add_b", down: func(*pbclient.Client) error { downCalls = append(downCalls, "202502_add_b"); return nil }},
-		stubMigration{name: "202603_add_c", down: func(*pbclient.Client) error { downCalls = append(downCalls, "202603_add_c"); return nil }},
+		stubMigration{name: "202401_add_a", down: func(pbclient.AuthenticatedClient) error { downCalls = append(downCalls, "202401_add_a"); return nil }},
+		stubMigration{name: "202502_add_b", down: func(pbclient.AuthenticatedClient) error { downCalls = append(downCalls, "202502_add_b"); return nil }},
+		stubMigration{name: "202603_add_c", down: func(pbclient.AuthenticatedClient) error { downCalls = append(downCalls, "202603_add_c"); return nil }},
 	}
 
 	if err := runner.RegisterAll(migrations...); err != nil {
@@ -225,7 +217,7 @@ func TestRunSerialized(t *testing.T) {
 	runner := NewRunner(client)
 
 	var upCalls atomic.Int64
-	m := stubMigration{name: "202401_alpha", up: func(*pbclient.Client) error {
+	m := stubMigration{name: "202401_alpha", up: func(pbclient.AuthenticatedClient) error {
 		time.Sleep(50 * time.Millisecond)
 		upCalls.Add(1)
 		return nil
@@ -257,18 +249,18 @@ func TestRunSerialized(t *testing.T) {
 
 type stubMigration struct {
 	name string
-	up   func(*pbclient.Client) error
-	down func(*pbclient.Client) error
+	up   func(pbclient.AuthenticatedClient) error
+	down func(pbclient.AuthenticatedClient) error
 }
 
 func (m stubMigration) Name() string { return m.name }
-func (m stubMigration) Up(c *pbclient.Client) error {
+func (m stubMigration) Up(c pbclient.AuthenticatedClient) error {
 	if m.up != nil {
 		return m.up(c)
 	}
 	return nil
 }
-func (m stubMigration) Down(c *pbclient.Client) error {
+func (m stubMigration) Down(c pbclient.AuthenticatedClient) error {
 	if m.down != nil {
 		return m.down(c)
 	}
@@ -293,12 +285,8 @@ func newMigrationTestServer(t *testing.T) *migrationTestServer {
 	return s
 }
 
-func (s *migrationTestServer) client() *pbclient.Client {
-	client, err := pbclient.NewClient(s.ts.URL, "admin@example.com", "password", pbclient.WithHTTPClient(s.ts.Client()))
-	if err != nil {
-		s.t.Fatalf("build client: %v", err)
-	}
-	return client
+func (s *migrationTestServer) client() pbclient.AuthenticatedClient {
+	return httpClientAdapter{baseURL: s.ts.URL, hc: s.ts.Client()}
 }
 
 func (s *migrationTestServer) close() {
@@ -353,6 +341,11 @@ func (s *migrationTestServer) handleGetCollection(w http.ResponseWriter, _ *http
 }
 
 func (s *migrationTestServer) handleRecords(w http.ResponseWriter, r *http.Request) {
+	if !s.collectionExists {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		s.handleList(w, r)
@@ -433,6 +426,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+type httpClientAdapter struct {
+	baseURL string
+	hc      *http.Client
+}
+
+func (a httpClientAdapter) Do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, a.baseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return a.hc.Do(req)
 }
 
 func parseIntDefault(raw string, fallback int) int {

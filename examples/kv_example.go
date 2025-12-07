@@ -12,24 +12,28 @@ import (
 )
 
 func main() {
-	client, err := pbclient.NewClient(
-		"https://your-pocketbase-host",
-		"admin@example.com",
-		"super-secret",
-	)
+	client, err := pbclient.NewClient("https://your-pocketbase-host")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	kv := pbclient.NewKVStore(client, "kv_store")
+	authed, err := client.AuthenticateSuperuser(pbclient.Credentials{
+		Email:    "admin@example.com",
+		Password: "super-secret",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	kv := pbclient.NewTypedKVStore[map[string]any](authed, "kv_store", "myapp")
 	ctx := context.Background()
 
 	if err := kv.Set(ctx, "feature_alpha", map[string]any{"enabled": true}); err != nil {
 		log.Fatal(err)
 	}
 
-	var flag map[string]any
-	if err := kv.Get(ctx, "feature_alpha", &flag); err != nil {
+	flag, err := kv.Get(ctx, "feature_alpha")
+	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("feature_alpha: %+v\n", flag)

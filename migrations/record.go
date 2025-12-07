@@ -12,6 +12,7 @@ const defaultCollectionName = "pb_migrations"
 // Record stores bookkeeping data for applied migrations inside PocketBase.
 type Record struct {
 	ID        string `json:"id"`
+	AppName   string `json:"appname"`
 	Name      string `json:"name"`
 	AppliedAt PBTime `json:"applied_at"`
 }
